@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local development
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Temporary files
+temp_images/
+*.tmp
+
+# Large model files
+vector_DB/
+diabetic_vector_db/
+
+# Downloaded images
+*.jpg
+*.png
+*.gif
+
+# Specific large files (use Git LFS)
+sas_model/*.safetensors
+sas_model/*.bin
+sas_model/*.pt
+sas_model/*.onnx
+
+# Database
+*.db
+*.sqlite3"blood-sugar.json" 

@@ -1,0 +1,27 @@
+<<<<<<< HEAD
+flask
+line-bot-sdk
+firebase-admin
+gunicorn
+pytz
+matplotlib
+google-cloud-storage
+
+=======
+python-dotenv>=1.0.0
+flask>=2.0.0
+pyngrok>=7.0.0
+line-bot-sdk>=3.5.0
+langchain-huggingface>=0.0.6
+langchain-community>=0.0.10
+faiss-cpu>=1.7.4  # 如果有 GPU 可以改用 faiss-gpu
+google-generativeai>=0.3.0
+sentence-transformers>=2.2.2
+torch>=2.0.0
+numpy>=1.24.0
+Pillow>=10.0.0
+requests>=2.31.0
+python-dateutil>=2.8.2
+pytz>=2024.1
+huggingface_hub>=0.20.3  # 用於下載模型檔案
+>>>>>>> 28b3d67 (message)

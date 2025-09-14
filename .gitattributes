@@ -1,0 +1,4 @@
+sas_model/*.safetensors filter=lfs diff=lfs merge=lfs -text
+sas_model/*.bin filter=lfs diff=lfs merge=lfs -text
+sas_model/*.pt filter=lfs diff=lfs merge=lfs -text
+sas_model/*.onnx filter=lfs diff=lfs merge=lfs -text
