@@ -4,7 +4,7 @@ python-dotenv==1.0.1
 line-bot-sdk==3.11.0
 
 # LangChain 生態
-langchain-core==0.3.7
+langchain-core==0.3.79
 langchain-community==0.3.1
 langchain-huggingface==0.3.1
 langsmith==0.1.125
