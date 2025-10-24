@@ -48,68 +48,71 @@ model = genai.GenerativeModel("gemini-2.5-flash-lite", generation_config=generat
 EMBED_MODEL_NAME = "DMetaSoul/sbert-chinese-general-v2"
 SAS_MODEL_DIR = os.path.join(os.path.dirname(__file__), "sas_model")
 
-# 初始化 SAS 模型
-try:
-    print("⏳ 正在從 Hugging Face 加載 SAS 模型...")
-    sas_model = CrossEncoder("Pkaser2323/SAS_Model", device="cpu")
-    print("✅ 從 Hugging Face 加載 SAS 模型成功！")
+# 全局變數
+sas_model = None
+SAS_PARAMS = {
+    "temperature": 2.0,
+    "high_threshold": 0.6,
+    "low_threshold": 0.3
+}
+is_model_ready = False
+model_init_error = None
+
+def initialize_sas_model():
+    """初始化 SAS 模型（非阻塞）"""
+    global sas_model, SAS_PARAMS, is_model_ready, model_init_error
     
-    # 嘗試從 Hugging Face 加載參數
     try:
-        from huggingface_hub import hf_hub_download
-        params_path = hf_hub_download(
-            repo_id="Pkaser2323/SAS_Model",
-            filename="best_params.json"
-        )
-        with open(params_path, "r", encoding="utf-8") as f:
-            SAS_PARAMS = json.load(f)
-        print("✅ 從 Hugging Face 加載參數成功！")
+        print("⏳ 正在從 Hugging Face 加載 SAS 模型...")
+        sas_model = CrossEncoder("Pkaser2323/SAS_Model", device="cpu")
+        print("✅ 從 Hugging Face 加載 SAS 模型成功！")
+        
+        # 嘗試從 Hugging Face 加載參數
+        try:
+            from huggingface_hub import hf_hub_download
+            params_path = hf_hub_download(
+                repo_id="Pkaser2323/SAS_Model",
+                filename="best_params.json"
+            )
+            with open(params_path, "r", encoding="utf-8") as f:
+                SAS_PARAMS = json.load(f)
+            print("✅ 從 Hugging Face 加載參數成功！")
+        except Exception as e:
+            print(f"⚠️ 無法從 Hugging Face 加載參數: {str(e)}")
+            print("⏳ 嘗試從本地加載參數...")
+            try:
+                with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
+                    SAS_PARAMS = json.load(f)
+                print("✅ 從本地加載參數成功！")
+            except Exception as e2:
+                print(f"⚠️ 無法從本地加載參數: {str(e2)}")
+                # 使用預設參數
+                print("✅ 使用預設參數")
+            
     except Exception as e:
-        print(f"⚠️ 無法從 Hugging Face 加載參數: {str(e)}")
-        print("⏳ 嘗試從本地加載參數...")
+        print(f"⚠️ 無法從 Hugging Face 加載模型: {str(e)}")
+        print("⏳ 嘗試從本地加載模型...")
         try:
-            with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
-                SAS_PARAMS = json.load(f)
-            print("✅ 從本地加載參數成功！")
+            sas_model = CrossEncoder(SAS_MODEL_DIR)
+            sas_model.model = sas_model.model.to("cpu")
+            print("✅ 從本地加載模型成功！")
+            
+            # 嘗試從本地加載參數
+            try:
+                with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
+                    SAS_PARAMS = json.load(f)
+                print("✅ 從本地加載參數成功！")
+            except Exception as e2:
+                print(f"⚠️ 無法從本地加載參數: {str(e2)}")
+                # 使用預設參數
+                print("✅ 使用預設參數")
         except Exception as e2:
-            print(f"⚠️ 無法從本地加載參數: {str(e2)}")
-            SAS_PARAMS = {
-                "temperature": 2.0,
-                "high_threshold": 0.6,
-                "low_threshold": 0.3
-            }
-            print("✅ 使用預設參數")
-        
-except Exception as e:
-    print(f"⚠️ 無法從 Hugging Face 加載模型: {str(e)}")
-    print("⏳ 嘗試從本地加載模型...")
-    try:
-        sas_model = CrossEncoder(SAS_MODEL_DIR)
-        sas_model.model = sas_model.model.to("cpu")
-        print("✅ 從本地加載模型成功！")
-        
-        # 嘗試從本地加載參數
-        try:
-            with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
-                SAS_PARAMS = json.load(f)
-            print("✅ 從本地加載參數成功！")
-        except Exception as e2:
-            print(f"⚠️ 無法從本地加載參數: {str(e2)}")
-            SAS_PARAMS = {
-                "temperature": 2.0,
-                "high_threshold": 0.6,
-                "low_threshold": 0.3
-            }
-            print("✅ 使用預設參數")
-    except Exception as e2:
-        print(f"❌ 本地模型加載也失敗: {str(e2)}")
-        print("⚠️ 將以降級模式運行（不使用 SAS 模型）")
-        sas_model = None
-        SAS_PARAMS = {
-            "temperature": 2.0,
-            "high_threshold": 0.6,
-            "low_threshold": 0.3
-        }
+            print(f"❌ 本地模型加載也失敗: {str(e2)}")
+            print("⚠️ 將以降級模式運行（不使用 SAS 模型）")
+            model_init_error = str(e2)
+            return
+
+    is_model_ready = True
 
 
 def predict_pos_prob(
@@ -119,14 +122,19 @@ def predict_pos_prob(
     temperature: float = 2.0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """預測正類機率"""
-    # 模型檢查
-    if model is None:
-        print("⚠️ SAS 模型未加載，返回預設分數")
-        return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
-    
     # 空輸入檢查
     if not questions or not answers or len(questions) != len(answers):
         return np.array([]), np.array([])
+    
+    # 模型就緒檢查
+    if not is_model_ready:
+        print("⚠️ SAS 模型尚未就緒，返回預設分數")
+        return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
+    
+    # 模型存在檢查
+    if model is None:
+        print("⚠️ SAS 模型未加載，返回預設分數")
+        return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
     
     # 過濾無效輸入
     valid_pairs = []
@@ -508,7 +516,25 @@ except Exception as e:
 # 健康檢查路由
 @app.route("/health", methods=["GET"])
 def health_check():
-    return "OK", 200
+    """健康檢查端點，回報服務狀態"""
+    status = {
+        "status": "healthy",
+        "model_ready": is_model_ready,
+        "error": model_init_error if model_init_error else None
+    }
+    return json.dumps(status), 200
+
+# 初始化路由
+@app.route("/init", methods=["GET"])
+def init_models():
+    """初始化模型（非阻塞）"""
+    if not is_model_ready and not model_init_error:
+        initialize_sas_model()
+    return json.dumps({
+        "status": "success" if is_model_ready else "initializing",
+        "model_ready": is_model_ready,
+        "error": model_init_error if model_init_error else None
+    }), 200
 
 # LINE Bot webhook
 @app.route("/callback", methods=['POST'])
