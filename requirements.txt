@@ -2,10 +2,10 @@ Flask==3.0.3
 gunicorn==21.2.0
 python-dotenv==1.0.1
 line-bot-sdk==3.11.0
-
+requests==2.31.0
 # LangChain 生態
 langchain-core==0.3.79
-langchain-community==0.3.31
+langchain-community==0.3.27
 langchain-huggingface==0.3.1
 langsmith==0.4.38
 # 向量/ML
