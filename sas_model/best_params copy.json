@@ -1,0 +1,14 @@
+{
+ "best_threshold": 0.74,
+ "best_f1": 0.7733333333333333,
+ "best_precision": 0.8055555555555556,
+ "best_recall": 0.7435897435897436,
+ "high_threshold": 0.6,
+ "low_threshold": 0.3,
+ "pos_mean": 0.7425843477249146,
+ "pos_std": 0.37838441133499146,
+ "neg_mean": 0.13780058920383453,
+ "neg_std": 0.29274046421051025,
+ "penalty": -1.0,
+ "temperature": 2.0
+}

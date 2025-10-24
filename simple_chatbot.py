@@ -5,15 +5,13 @@ import re
 from typing import List, Tuple
 from dotenv import load_dotenv
 from flask import Flask, request
-from pyngrok import ngrok
+from datetime import datetime
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
-    MessageEvent,
-    TextMessage,
-    TextSendMessage,
-    ImageMessage,
-    FlexSendMessage,
+    MessageEvent, TextMessage, TextSendMessage, ImageMessage,
+    FlexSendMessage, PostbackEvent, PostbackAction,
+    QuickReply, QuickReplyButton, MessageAction
 )
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -44,7 +42,7 @@ generation_config = {
     "response_mime_type": "text/plain",
 }
 
-model = genai.GenerativeModel("gemini-1.5-flash", generation_config=generation_config)
+model = genai.GenerativeModel("gemini-2.5-flash-lite", generation_config=generation_config)
 
 # 模型配置
 EMBED_MODEL_NAME = "DMetaSoul/sbert-chinese-general-v2"
@@ -126,45 +124,63 @@ def generate_subqueries(question: str, k: int = 2) -> List[str]:
 
 請列出子問題："""
 
-    try:
-        response = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.1, "max_output_tokens": 300}
-        )
-        
-        if not response or not hasattr(response, "text"):
-            return [question]
+    # 添加重試機制
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            response = model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.1, "max_output_tokens": 300}
+            )
             
-        text = response.text.strip()
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        
-        # 過濾並去重子問題
-        subqs = []
-        seen = set()
-        for line in lines:
-            # 移除可能的編號和符號
-            line = line.lstrip("0123456789. )-•").strip()
-            # 檢查長度和重複
-            if len(line) > 5 and line not in seen:
-                subqs.append(line)
-                seen.add(line)
-            if len(subqs) >= k:
-                break
-        
-        # 如果子問題不夠，補充預設問題
-        while len(subqs) < k:
-            if not subqs:
-                subqs.append(question)
-            else:
-                default_q = f"{question}的{len(subqs)+1}個面向是什麼？"
-                if default_q not in seen:
-                    subqs.append(default_q)
-                    seen.add(default_q)
-        
-        return subqs[:k]
-    except Exception as e:
-        print(f"GPT拆解子問題失敗: {e}")
-        return [question]
+            if not response or not hasattr(response, "text"):
+                retry_count += 1
+                print(f"⚠️ 生成子問題失敗 (嘗試 {retry_count}/{max_retries}): 回應無效")
+                continue
+                
+            text = response.text.strip()
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
+            
+            # 過濾並去重子問題
+            subqs = []
+            seen = set()
+            for line in lines:
+                # 移除可能的編號和符號
+                line = line.lstrip("0123456789. )-•").strip()
+                # 檢查長度和重複
+                if len(line) > 5 and line not in seen:
+                    subqs.append(line)
+                    seen.add(line)
+                if len(subqs) >= k:
+                    break
+            
+            # 如果成功生成至少一個子問題，就返回結果
+            if subqs:
+                # 如果子問題不夠，補充預設問題
+                while len(subqs) < k:
+                    if not subqs:
+                        subqs.append(question)
+                    else:
+                        default_q = f"{question}的{len(subqs)+1}個面向是什麼？"
+                        if default_q not in seen:
+                            subqs.append(default_q)
+                            seen.add(default_q)
+                return subqs[:k]
+            
+            retry_count += 1
+            print(f"⚠️ 生成子問題失敗 (嘗試 {retry_count}/{max_retries}): 未生成有效子問題")
+            
+        except Exception as e:
+            retry_count += 1
+            print(f"⚠️ 生成子問題失敗 (嘗試 {retry_count}/{max_retries}): {str(e)}")
+            if retry_count == max_retries:
+                print("❌ 達到最大重試次數，返回原問題")
+                return [question]
+            
+    # 如果所有重試都失敗，返回原問題
+    return [question]
 
 def initialize_vector_db():
     """初始化向量資料庫，如果不存在則從 CSV 創建"""
@@ -264,145 +280,154 @@ def search_related_content(retriever, query):
 
 def generate_answer(query: str, docs=None):
     """生成回答，使用 Fast/Slow path 機制"""
-    # 如果有檢索結果，先用 Fast path 評估
-    if docs:
-        print("🚀 Fast path: 評估檢索結果...")
-        # 使用 SAS 評估每個檢索結果
-        _, probs = predict_pos_prob(
-            sas_model,
-            [query] * len(docs),
-            [doc.page_content for doc in docs],
-            temperature=SAS_PARAMS.get("temperature", 2.0)
-        )
-        
-        # 檢查是否有段落通過高門檻
-        high_thr = SAS_PARAMS.get("high_threshold", 0.6)
-        passed_indices = np.nonzero(probs >= high_thr)[0]
-        
-        if len(passed_indices) > 0:
-            print(f"\n✅ 找到 {len(passed_indices)} 個通過高門檻的段落：")
-            # 顯示所有通過門檻的段落及其分數
-            for i, idx in enumerate(passed_indices):
-                print(f"\n段落 {i+1} (相關度分數: {probs[idx]:.3f}):")
-                print("-" * 50)
-                print(docs[idx].page_content)
-                print("-" * 50)
+    try:
+        # 如果有檢索結果，先用 Fast path 評估
+        if docs:
+            print("🚀 Fast path: 評估檢索結果...")
+            # 使用 SAS 評估每個檢索結果
+            _, probs = predict_pos_prob(
+                sas_model,
+                [query] * len(docs),
+                [doc.page_content for doc in docs],
+                temperature=SAS_PARAMS.get("temperature", 2.0)
+            )
             
-            # 選擇最多3個最高分的段落
-            top_indices = passed_indices[np.argsort(-probs[passed_indices])[:3]]
-            print(f"\n🔍 選擇前 {len(top_indices)} 個最高分段落用於生成回答")
-            evidence = "\n".join([docs[i].page_content for i in top_indices])
+            # 檢查是否有段落通過高門檻
+            high_thr = SAS_PARAMS.get("high_threshold", 0.6)
+            passed_indices = np.nonzero(probs >= high_thr)[0]
             
-            # 使用 GPT 生成回答
-            template = f"""
-任務: 
-1. 你是一位在台灣的糖尿病領域的專業護理師，需要以專業嚴謹但親切的態度回答病患的問題。
+            if len(passed_indices) > 0:
+                print(f"\n✅ 找到 {len(passed_indices)} 個通過高門檻的段落：")
+                # 顯示所有通過門檻的段落及其分數
+                for i, idx in enumerate(passed_indices):
+                    print(f"\n段落 {i+1} (相關度分數: {probs[idx]:.3f}):")
+                    print("-" * 50)
+                    print(docs[idx].page_content)
+                    print("-" * 50)
+                
+                # 選擇最多3個最高分的段落
+                top_indices = passed_indices[np.argsort(-probs[passed_indices])[:3]]
+                print(f"\n🔍 選擇前 {len(top_indices)} 個最高分段落用於生成回答")
+                evidence = "\n".join([docs[i].page_content for i in top_indices])
+                
+                # 使用 GPT 生成回答
+                template = f"""
+你是一位充滿熱情、幽默又專業的糖尿病護理師，
+請根據以下資訊，用自然、有感染力的口吻回答病患問題。
 
-2. 請仔細分析下方的「相關文本」，並按照以下步驟回答：
-   a. 從「相關文本」中提取可靠且相關的醫療資訊
-   b. 確保所提供的每一項建議都有文獻依據
-   c. 整合資訊時，需明確區分：
-      - 確定的醫療建議（有明確依據）
-      - 一般性建議（基於專業知識）
-   d. 使用準確的醫療術語，並提供清晰的解釋
+請想像你正在和病患聊天，
+語氣要像在現場講話一樣溫暖、有活力、讓人放鬆。
 
-3. 回答要求：
-   - 字數限制：最多100字，且回答須清晰易懂
-   - 不需列出文獻來源，只根據「相關文本」作答  
-   - 使用繁體中文，語氣親切清晰  
-   - 分段呈現，提高可讀性
-
-------
-「相關文本」：
+相關資訊：
 {evidence}
-------
-「病患的提問」：
+
+病患提問：
 {query}
 
-請基於上述相關文本，提供專業且實用的回答：
+回答要求：
+1. 使用繁體中文，以熱情親切的語氣回答
+2. 回答限制100字以內
+3. 內容要清晰易懂
+4. 只根據提供的資訊回答
+5. 不要使用任何特殊符號或標記（如*號）
+6. 適當分段以提高可讀性
+
+請提供您的專業建議：
 """
-            response = model.generate_content(template)
-            return response.text if response else "不好意思，我不清楚這個問題，建議您諮詢專業醫師。"
-    
-    # 如果 Fast path 失敗，嘗試 Slow path
-    print("🐢 Slow path: 拆解子問題...")
-    subqs = generate_subqueries(query)
-    print(f"✓ 生成 {len(subqs)} 個子問題")
-    
-    # 為每個子問題檢索並評估
-    all_evidence = []
-    low_thr = SAS_PARAMS.get("low_threshold", 0.3)
-    
-    for sq in subqs:
-        # 檢索相關文本
-        sq_docs = retriever.invoke(sq)
-        if not sq_docs:
-            continue
+                # 添加重試機制
+                max_retries = 3
+                retry_count = 0
+                while retry_count < max_retries:
+                    try:
+                        response = model.generate_content(template)
+                        if response and hasattr(response, 'text'):
+                            return response.text
+                        break
+                    except Exception as e:
+                        print(f"⚠️ 生成回答時發生錯誤 (嘗試 {retry_count + 1}/{max_retries}): {str(e)}")
+                        retry_count += 1
+                        if retry_count == max_retries:
+                            # 如果重試全部失敗，返回檢索到的相關文本作為回答
+                            return f"根據資料庫內容：{evidence[:100]}..."  # 截取前100字
+                
+                return "不好意思，我不清楚這個問題，建議您諮詢專業醫師。"
+        
+        # 如果 Fast path 失敗，嘗試 Slow path
+        print("🐢 Slow path: 拆解子問題...")
+        subqs = generate_subqueries(query)
+        print(f"✓ 生成 {len(subqs)} 個子問題")
+        
+        # 為每個子問題檢索並評估
+        all_evidence = []
+        low_thr = SAS_PARAMS.get("low_threshold", 0.3)
+        
+        for sq in subqs:
+            # 檢索相關文本
+            sq_docs = retriever.invoke(sq)
+            if not sq_docs:
+                continue
+                
+            # 評估每個檢索結果
+            _, probs = predict_pos_prob(
+                sas_model,
+                [sq] * len(sq_docs),
+                [doc.page_content for doc in sq_docs],
+                temperature=SAS_PARAMS.get("temperature", 2.0)
+            )
             
-        # 評估每個檢索結果
+            # 收集通過低門檻的段落
+            passed_indices = np.nonzero(probs >= low_thr)[0]
+            if len(passed_indices) > 0:
+                # 選擇最多2個最高分的段落
+                top_indices = passed_indices[np.argsort(-probs[passed_indices])[:2]]
+                all_evidence.extend([sq_docs[i].page_content for i in top_indices])
+        
+        # 如果沒有找到任何有效證據
+        if not all_evidence:
+            return "這個問題需要更多專業資訊才能完整回答，建議您諮詢主治醫師。"
+        
+        # 使用 GPT 整合所有證據生成回答
+        evidence_text = "\n".join(all_evidence)
+        template = f"""
+您是一位熱情且專業的糖尿病護理師，請根據以下資訊回答病患問題：
+
+相關資訊：
+{evidence_text}
+
+病患提問：
+{query}
+
+回答要求：
+1.不要使用「您好」「別擔心」「請放心」等制式開場白。
+2. 使用繁體中文，以專業但親切的語氣回答
+3. 回答限制100字以內
+4. 語氣讓人感覺被理解、有希望，內容清楚又實用
+5. 只根據提供的資訊回答
+6. 不要使用任何特殊符號或標記（如*號）
+7. 適當分段以提高可讀性
+
+請以貼心又充滿能量的方式回答病患：：
+"""
+        response = model.generate_content(template)
+        answer = response.text if response else "不好意思，我不清楚這個問題，建議您諮詢專業醫師。"
+        
+        # 最後用原問題評估生成的答案
         _, probs = predict_pos_prob(
             sas_model,
-            [sq] * len(sq_docs),
-            [doc.page_content for doc in sq_docs],
+            [query],
+            [answer],
             temperature=SAS_PARAMS.get("temperature", 2.0)
         )
         
-        # 收集通過低門檻的段落
-        passed_indices = np.nonzero(probs >= low_thr)[0]
-        if len(passed_indices) > 0:
-            # 選擇最多2個最高分的段落
-            top_indices = passed_indices[np.argsort(-probs[passed_indices])[:2]]
-            all_evidence.extend([sq_docs[i].page_content for i in top_indices])
-    
-    # 如果沒有找到任何有效證據
-    if not all_evidence:
-        return "這個問題需要更多專業資訊才能完整回答，建議您諮詢主治醫師。"
-    
-    # 使用 GPT 整合所有證據生成回答
-    evidence_text = "\n".join(all_evidence)
-    template = f"""
-任務: 
-1. 你是一位在台灣的糖尿病領域的專業護理師，需要以專業嚴謹但親切的態度回答病患的問題。
-
-2. 請仔細分析下方的「相關文本」，並按照以下步驟回答：
-   a. 從「相關文本」中提取可靠且相關的醫療資訊
-   b. 確保所提供的每一項建議都有文獻依據
-   c. 整合資訊時，需明確區分：
-      - 確定的醫療建議（有明確依據）
-      - 一般性建議（基於專業知識）
-   d. 使用準確的醫療術語，並提供清晰的解釋
-
-3. 回答要求：
-   - 字數限制：最多100字，且回答須清晰易懂
-   - 不需列出文獻來源，只根據「相關文本」作答  
-   - 使用繁體中文，語氣親切清晰  
-   - 分段呈現，提高可讀性
-
-------
-「相關文本」：
-{evidence_text}
-------
-「病患的提問」：
-{query}
-
-請基於上述相關文本，提供專業且實用的回答：
-"""
-    response = model.generate_content(template)
-    answer = response.text if response else "不好意思，我不清楚這個問題，建議您諮詢專業醫師。"
-    
-    # 最後用原問題評估生成的答案
-    _, probs = predict_pos_prob(
-        sas_model,
-        [query],
-        [answer],
-            temperature=SAS_PARAMS.get("temperature", 2.0)
-    )
-    
-    # 如果最終答案未通過高門檻，建議諮詢醫師
-    if probs[0] < SAS_PARAMS.get("high_threshold", 0.6):
-        return "這個問題需要更多專業資訊才能完整回答，建議您諮詢主治醫師。"
-    
-    return answer
+        # 如果最終答案未通過高門檻，建議諮詢醫師
+        if probs[0] < SAS_PARAMS.get("high_threshold", 0.6):
+            return "這個問題需要更多專業資訊才能完整回答，建議您諮詢主治醫師。"
+        
+        return answer
+        
+    except Exception as e:
+        print(f"❌ 生成回答時發生錯誤: {str(e)}")
+        return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
 
 # Flask app setup
 app = Flask(__name__)
@@ -425,29 +450,1162 @@ def health_check():
     return "OK", 200
 
 # LINE Bot webhook
-@app.route("/callback", methods=["POST"])
+@app.route("/callback", methods=['POST'])
 def callback():
-    # 獲取 X-Line-Signature header 值
-    signature = request.headers.get("X-Line-Signature", "")
-    
-    # 獲取請求內容
     body = request.get_data(as_text=True)
-    print(f"✅ Received webhook: {body[:100]}...")  # 只打印前100個字符
-    
     try:
-        # 驗證簽名
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        print("❌ Invalid signature")
-        return "Invalid signature", 400
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        return str(e), 500
+        json_data = json.loads(body)
+        access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+        secret = os.environ.get('LINE_CHANNEL_SECRET')
         
-    return "OK", 200
+        if not access_token or not secret:
+            print("錯誤: LINE_CHANNEL_ACCESS_TOKEN 或 LINE_CHANNEL_SECRET 環境變數未設定")
+            return "Configuration Error", 500
 
-# 全局數據存儲，用於保存食物分析結果
-global_data_store = {}
+        line_bot_api = LineBotApi(access_token)
+        handler = WebhookHandler(secret)
+        signature = request.headers['X-Line-Signature']
+        handler.handle(body, signature)
+
+        event = json_data['events'][0]
+        event_type = event['type']
+        user_id = event['source']['userId']  # 使用者 ID
+        
+        # 某些事件沒有 replyToken (如 unfollow)
+        tk = event.get('replyToken')
+        if not tk:
+            print(f"事件類型 {event_type} 沒有 replyToken，忽略")
+            return "OK"
+        
+        # 處理加好友事件
+        if event_type == 'follow':
+            # 新用戶加入 → 發送專業的條款頁面
+            flex_message = create_terms_flex_message()
+            line_bot_api.reply_message(tk, FlexSendMessage(
+                alt_text=flex_message["altText"],
+                contents=flex_message["contents"]
+            ))
+            user_consent[user_id] = {
+                "status": "pending",
+                "first_contact": datetime.now().isoformat(),
+                "blood_sugar_records": []
+            }
+            save_user_data(user_consent)
+            return "OK"
+
+        elif event_type == 'message':
+            msg_type = event['message']['type']
+            if msg_type == 'text':
+                msg = event['message']['text']
+                print(f"收到: {msg}")
+
+                # 檢查是否已經同意
+                if user_id not in user_consent:
+                    # 新用戶 → 發送專業的條款頁面
+                    flex_message = create_terms_flex_message()
+                    line_bot_api.reply_message(tk, FlexSendMessage(
+                        alt_text=flex_message["altText"],
+                        contents=flex_message["contents"]
+                    ))
+                    user_consent[user_id] = {
+                        "status": "pending",
+                        "first_contact": datetime.now().isoformat(),
+                        "blood_sugar_records": []
+                    }
+                    save_user_data(user_consent)
+                    return "OK"
+
+                elif user_consent[user_id].get("status") == "pending":
+                    # 等待用戶回覆
+                    if msg == "同意":
+                        # 發送條款完成訊息 + 直接發送按鈕確認訊息
+                        welcome_message = create_welcome_message()
+                        button_check_message = create_button_check_message()
+                        
+                        # 發送兩條訊息：條款完成 + 按鈕確認
+                        line_bot_api.reply_message(tk, [
+                            FlexSendMessage(
+                                alt_text=welcome_message["altText"],
+                                contents=welcome_message["contents"]
+                            ),
+                            button_check_message
+                        ])
+                        
+                        user_consent[user_id]["status"] = "awaiting_button_response"  # 直接設為等待按鈕回應
+                        user_consent[user_id]["agreed_time"] = datetime.now().isoformat()
+                        save_user_data(user_consent)
+                        return "OK"
+                    elif msg == "不同意":
+                        reply = "感謝您的回覆。如果您改變心意，歡迎隨時重新開始對話。\n\n為了保護您的隱私，我們將不會保存任何資料。"
+                        user_consent[user_id]["status"] = "disagreed"
+                        user_consent[user_id]["disagreed_time"] = datetime.now().isoformat()
+                        save_user_data(user_consent)
+                        line_bot_api.reply_message(tk, TextSendMessage(text=reply))
+                        return "OK"
+                    else:
+                        reply = "請點選條款頁面中的「同意並開始使用」或「暫不同意」按鈕，或直接回覆「同意」或「不同意」。"
+                        line_bot_api.reply_message(tk, TextSendMessage(text=reply))
+                        return "OK"
+
+                elif user_consent[user_id].get("status") == "awaiting_button_response":
+                    # 處理按鈕確認回應
+                    if msg == "有":
+                        # 用戶看到按鈕了，詢問是否要教學
+                        tutorial_choice_message = create_tutorial_choice_message()
+                        line_bot_api.reply_message(tk, tutorial_choice_message)
+                        user_consent[user_id]["status"] = "awaiting_tutorial_choice"
+                        save_user_data(user_consent)
+                        return "OK"
+                    elif msg == "沒有":
+                        # 用戶沒看到按鈕，提供說明
+                        reply = "沒關係！我們來說明一下：\n\n在我的訊息下方，您會看到一些按鈕，這些按鈕可以幫助您快速選擇回應。\n\n如果您現在看到了，請回覆「有」；如果還是沒看到，請回覆「沒有」。"
+                        line_bot_api.reply_message(tk, TextSendMessage(text=reply))
+                        return "OK"
+                    else:
+                        reply = "請回覆「有」或「沒有」，讓我知道您是否看到下面的按鈕。"
+                        line_bot_api.reply_message(tk, TextSendMessage(text=reply))
+                        return "OK"
+
+                elif user_consent[user_id].get("status") == "awaiting_tutorial_choice":
+                    # 處理教學選擇回應
+                    if msg == "我要教學":
+                        # 發送5頁功能介紹carousel
+                        tutorial_carousel = create_tutorial_carousel()
+                        line_bot_api.reply_message(tk, FlexSendMessage(
+                            alt_text=tutorial_carousel["altText"],
+                            contents=tutorial_carousel["contents"]
+                        ))
+                        user_consent[user_id]["status"] = "tutorial_shown"
+                        save_user_data(user_consent)
+                        return "OK"
+                    elif msg == "我不要教學":
+                        # 發送跳過教學祝福訊息
+                        skip_message = create_skip_tutorial_message()
+                        line_bot_api.reply_message(tk, skip_message)
+                        user_consent[user_id]["status"] = "agreed"  # 直接進入正常使用狀態
+                        save_user_data(user_consent)
+                        return "OK"
+                    else:
+                        reply = "請回覆「我要教學」或「我不要教學」，讓我知道您的選擇。"
+                        line_bot_api.reply_message(tk, TextSendMessage(text=reply))
+                        return "OK"
+
+                elif user_consent[user_id].get("status") == "tutorial_shown":
+                    # 教學已顯示，處理教學相關回應或進入正常功能
+                    if msg in ["問答教學", "語音教學", "血糖教學", "影像教學"]:
+                        # 根據不同的教學選擇發送對應的詳細教學Carousel
+                        tutorial_carousels = {
+                            "問答教學": create_qa_tutorial_carousel(),
+                            "語音教學": create_voice_tutorial_carousel(),
+                            "血糖教學": create_blood_sugar_tutorial_carousel(),
+                            "影像教學": create_image_tutorial_carousel()
+                        }
+                        
+                        selected_carousel = tutorial_carousels[msg]
+                        
+                        # 發送詳細教學Carousel
+                        line_bot_api.reply_message(tk, FlexSendMessage(
+                            alt_text=selected_carousel["altText"],
+                            contents=selected_carousel["contents"]
+                        ))
+                        
+                        user_consent[user_id]["status"] = "detailed_tutorial"  # 設為詳細教學狀態
+                        save_user_data(user_consent)
+                        return "OK"
+                    else:
+                        # 其他訊息，更新狀態並繼續處理正常功能邏輯
+                        user_consent[user_id]["status"] = "agreed"
+                        save_user_data(user_consent)
+                
+                elif user_consent[user_id].get("status") == "detailed_tutorial":
+                    # 用戶看完詳細教學，任何訊息都進入正常使用狀態
+                    user_consent[user_id]["status"] = "agreed"
+                    save_user_data(user_consent)
+                    # 繼續處理正常功能邏輯
+
+                else:
+                    # 已經有狀態了
+                    if user_consent[user_id].get("status") == "agreed":
+                        # 用戶已完成引導，準備接收RAG功能
+                        if msg == "教學" or msg == "功能介紹":
+                            # 重新顯示功能介紹carousel
+                            tutorial_carousel = create_tutorial_carousel()
+                            line_bot_api.reply_message(tk, FlexSendMessage(
+                                alt_text=tutorial_carousel["altText"],
+                                contents=tutorial_carousel["contents"]
+                            ))
+                            user_consent[user_id]["status"] = "tutorial_shown"
+                            save_user_data(user_consent)
+                            return "OK"
+                        else:
+                            # 其他訊息 - 使用原有的消息處理邏輯
+                            handle_message(event)
+                            return "OK"
+                    elif user_consent[user_id].get("status") == "disagreed":
+                        reply = "由於您尚未同意服務條款，目前無法使用糖小護的功能。\n\n如果您想重新開始，請輸入「重新開始」。"
+                        if msg == "重新開始":
+                            del user_consent[user_id]
+                            save_user_data(user_consent)
+                            flex_message = create_terms_flex_message()
+                            line_bot_api.reply_message(tk, FlexSendMessage(
+                                alt_text=flex_message["altText"],
+                                contents=flex_message["contents"]
+                            ))
+                            return "OK"
+                        line_bot_api.reply_message(tk, TextSendMessage(text=reply))
+                        return "OK"
+            else:
+                # 非文字訊息 - 使用原有的消息處理邏輯
+                handle_message(event)
+                return "OK"
+        
+        else:
+            # 其他事件類型 (unfollow, postback 等)
+            return "OK"
+
+    except Exception as e:
+        print("錯誤:", e)
+        print("收到內容:", body)
+        return "Error", 500
+    
+    return "OK"
+
+# 用戶數據文件路徑
+USER_DATA_FILE = "user_data.json"
+
+def create_terms_flex_message():
+    """創建專業的用戶條款 Flex Message"""
+    return {
+        "type": "flex",
+        "altText": "糖小護服務條款",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "糖小護",
+                        "weight": "bold",
+                        "size": "xl",
+                        "color": "#2E86AB",
+                        "align": "center"
+                    },
+                    {
+                        "type": "text",
+                        "text": "服務條款",
+                        "size": "md",
+                        "color": "#5A9FD4",
+                        "align": "center",
+                        "margin": "sm"
+                    }
+                ],
+                "backgroundColor": "#F0F8FF",
+                "paddingAll": "20px",
+                "cornerRadius": "10px"
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "一、資料蒐集範圍",
+                        "weight": "bold",
+                        "size": "sm",
+                        "color": "#2E86AB",
+                        "margin": "md"
+                    },
+                    {
+                        "type": "text",
+                        "text": "血糖數值記錄\n健康諮詢對話內容\n上傳的醫療相關圖片\n使用行為統計資料",
+                        "size": "xs",
+                        "color": "#666666",
+                        "wrap": True,
+                        "margin": "sm"
+                    },
+                    {
+                        "type": "text",
+                        "text": "二、使用目的",
+                        "weight": "bold",
+                        "size": "sm",
+                        "color": "#2E86AB",
+                        "margin": "lg"
+                    },
+                    {
+                        "type": "text",
+                        "text": "提供個人化健康建議\n生成專屬個人健康報表\n持續改善服務品質",
+                        "size": "xs",
+                        "color": "#666666",
+                        "wrap": True,
+                        "margin": "sm"
+                    },
+                    {
+                        "type": "text",
+                        "text": "三、隱私保護",
+                        "weight": "bold",
+                        "size": "sm",
+                        "color": "#2E86AB",
+                        "margin": "lg"
+                    },
+                    {
+                        "type": "text",
+                        "text": "您可隨時要求刪除個人資料\n全程遵守《個人資料保護法》及相關醫療資訊法規",
+                        "size": "xs",
+                        "color": "#666666",
+                        "wrap": True,
+                        "margin": "sm"
+                    },
+                    {
+                        "type": "text",
+                        "text": "四、同意與生效",
+                        "weight": "bold",
+                        "size": "sm",
+                        "color": "#2E86AB",
+                        "margin": "lg"
+                    },
+                    {
+                        "type": "text",
+                        "text": "繼續使用即表示您已閱讀並同意本服務條款。",
+                        "size": "xs",
+                        "color": "#666666",
+                        "wrap": True,
+                        "margin": "sm"
+                    }
+                ],
+                "paddingAll": "20px",
+                "spacing": "sm"
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "separator",
+                        "margin": "md",
+                        "color": "#E6F3FF"
+                    },
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "style": "secondary",
+                                "height": "sm",
+                                "action": {
+                                    "type": "message",
+                                    "label": "暫不同意",
+                                    "text": "不同意"
+                                },
+                                "color": "#CCCCCC",
+                                "flex": 1
+                            },
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "height": "sm",
+                                "action": {
+                                    "type": "message",
+                                    "label": "同意並開始使用",
+                                    "text": "同意"
+                                },
+                                "color": "#2E86AB",
+                                "flex": 2
+                            }
+                        ],
+                        "spacing": "sm",
+                        "margin": "md"
+                    }
+                ],
+                "paddingAll": "20px"
+            }
+        }
+    }
+
+def load_user_data():
+    """載入用戶數據"""
+    if os.path.exists(USER_DATA_FILE):
+        try:
+            with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_user_data(data):
+    """保存用戶數據"""
+    try:
+        with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"保存用戶數據失敗: {e}")
+
+def create_welcome_message():
+    """創建歡迎訊息 - 條款同意完成"""
+    return {
+        "type": "flex",
+        "altText": "歡迎使用糖小護",
+        "contents": {
+            "type": "bubble",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "條款同意完成",
+                        "weight": "bold",
+                        "size": "lg",
+                        "color": "#FFFFFF",
+                        "align": "center"
+                    }
+                ],
+                "backgroundColor": "#2E86AB",
+                "paddingAll": "15px"
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "接下來將為您介紹糖小護的功能...",
+                        "size": "sm",
+                        "color": "#666666",
+                        "align": "center",
+                        "wrap": True
+                    }
+                ],
+                "paddingAll": "20px"
+            }
+        }
+    }
+
+def create_button_check_message():
+    """創建第一階段按鈕確認訊息 - 詢問是否看到按鈕"""
+    return TextSendMessage(
+        text="嗨~你有沒有看到下面的按鈕呢？",
+        quick_reply=QuickReply(
+            items=[
+                QuickReplyButton(
+                    action=MessageAction(label="有", text="有")
+                ),
+                QuickReplyButton(
+                    action=MessageAction(label="沒有", text="沒有")
+                )
+            ]
+        )
+    )
+
+def create_tutorial_choice_message():
+    """創建第二階段教學意願確認訊息"""
+    return TextSendMessage(
+        text="太棒了！那你想要了解更多的教學內容嗎？",
+        quick_reply=QuickReply(
+            items=[
+                QuickReplyButton(
+                    action=MessageAction(label="我要教學", text="我要教學")
+                ),
+                QuickReplyButton(
+                    action=MessageAction(label="我不要教學", text="我不要教學")
+                )
+            ]
+        )
+    )
+
+def create_skip_tutorial_message():
+    """創建跳過教學的祝福訊息"""
+    return TextSendMessage(
+        text="好的，那祝你使用愉快！🍭\n\n如果之後想了解功能，隨時都可以詢問我喔～\n\n現在就開始記錄您的血糖數值或詢問健康問題吧！"
+    )
+
+def create_tutorial_carousel():
+    """創建5頁Flex Carousel功能介紹訊息"""
+    return {
+        "type": "flex",
+        "altText": "糖小護功能介紹",
+        "contents": {
+            "type": "carousel",
+            "contents": [
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://i.postimg.cc/7h9gjpYL/url.png",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "歡迎使用糖小護",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "您的專屬健康管理助手",
+                                "size": "md",
+                                "color": "#666666",
+                                "align": "center",
+                                "wrap": True,
+                                "margin": "sm"
+                            },
+                            {
+                                "type": "separator",
+                                "margin": "lg",
+                                "color": "#E6F3FF"
+                            },
+                            {
+                                "type": "text",
+                                "text": "👉 往右滑動查看功能介紹",
+                                "size": "sm",
+                                "color": "#5A9FD4",
+                                "align": "center",
+                                "margin": "lg",
+                                "weight": "bold"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://i.postimg.cc/GtdF7cry/url2.png",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "問與答",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "• 專業糖尿病知識問答\n• RAG 檢索增強生成\n• 24小時智能諮詢",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    },
+                    "footer": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "height": "sm",
+                                "action": {
+                                    "type": "message",
+                                    "label": "查看教學",
+                                    "text": "問答教學"
+                                },
+                                "color": "#2E86AB"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://i.postimg.cc/x8nvx0Yk/url3.png",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "語音轉文字",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "• 支援國語、台語辨識\n• LIFF 網頁錄音介面\n• 即時語音轉文字",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    },
+                    "footer": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "height": "sm",
+                                "action": {
+                                    "type": "message",
+                                    "label": "查看教學",
+                                    "text": "語音教學"
+                                },
+                                "color": "#2E86AB"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://i.postimg.cc/d3w2Hqvk/url4.png",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "血糖管理室",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "• 血糖數值記錄追蹤\n• Firebase 雲端儲存\n• 個人化報表圖表",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    },
+                    "footer": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "height": "sm",
+                                "action": {
+                                    "type": "message",
+                                    "label": "查看教學",
+                                    "text": "血糖教學"
+                                },
+                                "color": "#2E86AB"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://i.postimg.cc/KjfnCdv7/url5.png",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "影像辨識",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "• Gemini AI影像分析\n• 醫療相關圖片辨識\n• 智能健康建議",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    },
+                    "footer": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "height": "sm",
+                                "action": {
+                                    "type": "message",
+                                    "label": "查看教學",
+                                    "text": "影像教學"
+                                },
+                                "color": "#2E86AB"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                }
+            ]
+        }
+    }
+
+def create_qa_tutorial_carousel():
+    """創建問答功能詳細教學 Carousel"""
+    return {
+        "type": "flex",
+        "altText": "問答功能教學",
+        "contents": {
+            "type": "carousel",
+            "contents": [
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/qa-step1.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第1步：開始提問",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "直接在聊天室輸入您的健康問題，例如：\n\n• 血糖高怎麼辦？\n• 糖尿病可以吃什麼？\n• 運動對血糖的影響",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/qa-step2.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第2步：AI分析回答",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "糖小護會透過RAG系統：\n\n• 搜尋專業知識庫\n• 分析您的問題\n• 提供準確的健康建議\n• 給出相關的參考資料",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                }
+            ]
+        }
+    }
+
+def create_voice_tutorial_carousel():
+    """創建語音轉文字詳細教學 Carousel"""
+    return {
+        "type": "flex",
+        "altText": "語音轉文字教學",
+        "contents": {
+            "type": "carousel",
+            "contents": [
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/voice-step1.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第1步：點擊語音按鈕",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "在聊天室下方的功能按鈕中，找到並點擊：\n\n🎤 語音轉文字\n\n點擊後會自動跳轉到錄音網頁",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/voice-step2.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第2步：選擇語言",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "在錄音頁面選擇您要使用的語言：\n\n🇹🇼 國語\n🇹🇼 台語\n\n選擇完成後準備開始錄音",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/voice-step3.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第3步：開始錄音",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "點擊錄音按鈕開始說話：\n\n• 清楚說出您的問題\n• 錄音完成後點擊停止\n• 系統會自動轉換成文字\n• 文字會直接發送到聊天室",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                }
+            ]
+        }
+    }
+
+def create_blood_sugar_tutorial_carousel():
+    """創建血糖管理詳細教學 Carousel"""
+    return {
+        "type": "flex",
+        "altText": "血糖管理室教學",
+        "contents": {
+            "type": "carousel",
+            "contents": [
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/blood-step1.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第1步：記錄血糖數值",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "直接輸入血糖數值即可記錄：\n\n• 直接輸入數字：120\n• 加上單位：150mg/dL\n• 加上說明：早餐後血糖 140",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/blood-step2.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第2步：查看歷史記錄",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "輸入關鍵字查看記錄：\n\n• 輸入「報表」\n• 輸入「歷史」\n• 輸入「記錄」\n\n系統會顯示您的血糖趨勢",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/blood-step3.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第3步：生成個人報表",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "系統會自動生成：\n\n• 血糖趨勢圖表\n• 每日平均數值\n• 健康狀態評估\n• 個人化建議",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                }
+            ]
+        }
+    }
+
+def create_image_tutorial_carousel():
+    """創建影像辨識詳細教學 Carousel"""
+    return {
+        "type": "flex",
+        "altText": "影像辨識教學",
+        "contents": {
+            "type": "carousel",
+            "contents": [
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/image-step1.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第1步：拍攝清楚照片",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "拍攝以下類型的圖片：\n\n• 血糖儀螢幕讀數\n• 藥品包裝或標籤\n• 食物營養標示\n• 醫療報告數據",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/image-step2.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第2步：發送圖片",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "直接在聊天室發送圖片：\n\n• 點擊相機圖示\n• 選擇拍照或從相簿選取\n• 確認圖片清晰可見\n• 發送給糖小護",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                },
+                {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": "https://your-image-host.com/image-step3.jpg",
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "第3步：AI智能分析",
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": "#2E86AB",
+                                "align": "center"
+                            },
+                            {
+                                "type": "text",
+                                "text": "Gemini AI會自動分析：\n\n• 識別圖片中的文字和數據\n• 理解醫療相關內容\n• 提供專業健康建議\n• 回答相關問題",
+                                "size": "sm",
+                                "color": "#666666",
+                                "wrap": True,
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                }
+            ]
+        }
+    }
+
+# 載入用戶同意狀態
+user_consent = load_user_data()
+
+# 全局數據存儲
+global_data_store = {
+    "processed_messages": set(),  # 用於存儲已處理的消息ID
+    "message_lock": False,        # 用於防止並發處理
+    "food_analysis": {}          # 用於保存食物分析結果
+}
 
 def translate_to_chinese(english_text):
     """翻譯英文食物名稱為繁體中文"""
@@ -462,7 +1620,7 @@ def translate_to_chinese(english_text):
 def analyze_nutrition_for_flex(nutrition_data):
     """分析營養數據，提取優點、風險和建議"""
     analysis_prompt = f"""任務:
-1. 你是一位專業營養師，請根據以下食物的營養資訊進行分析：
+1. 你是一位充滿熱情與關懷的專業營養師，請根據以下食物的營養資訊進行分析：
 2. 分析結果必須包含這三個區塊：優點、潛在風險、建議（針對糖尿病患者）
 3. 每個區塊提供 1-2 點簡潔的分析，每點不超過15字
 4. 使用繁體中文
@@ -493,12 +1651,13 @@ def analyze_nutrition_for_flex(nutrition_data):
         return {"優點": [], "潛在風險": [], "建議": []}
 
 def calculate_calorie_sources(nutrition_data_list):
-    """計算熱量來源佔比"""
+    """計算熱量來源佔比並評估糖分含量"""
     total_carb_calories = 0
     total_protein_calories = 0
     total_fat_calories = 0
     total_sugar_calories = 0
     total_calories = 0
+    total_sugar_grams = 0
 
     # 熱量換算：碳水4卡/克，蛋白質4卡/克，脂肪9卡/克，糖分4卡/克
     for data in nutrition_data_list:
@@ -517,6 +1676,18 @@ def calculate_calorie_sources(nutrition_data_list):
         total_fat_calories += fat_cal
         total_sugar_calories += sugar_cal
         total_calories += float(data.get("calories", 0) or 0)
+        total_sugar_grams += sugar
+
+    # 計算糖分佔總熱量的百分比
+    sugar_percent = (total_sugar_calories / total_calories * 100) if total_calories > 0 else 0
+
+    # 評估糖分含量
+    if total_sugar_grams > 25 or sugar_percent > 10:
+        sugar_label = "高糖 (需注意，可能超過建議攝取)"
+    elif total_sugar_grams > 10 or sugar_percent > 5:
+        sugar_label = "中糖 (適量攝取)"
+    else:
+        sugar_label = "低糖"
 
     return {
         "carbs_calories": round(total_carb_calories, 0),
@@ -524,6 +1695,9 @@ def calculate_calorie_sources(nutrition_data_list):
         "fat_calories": round(total_fat_calories, 0),
         "sugar_calories": round(total_sugar_calories, 0),
         "total_calories": round(total_calories, 0),
+        "total_sugar_grams": round(total_sugar_grams, 1),
+        "sugar_percent": round(sugar_percent, 1),
+        "sugar_label": sugar_label,
         "is_estimated": total_calories == 0,
     }
 
@@ -597,36 +1771,118 @@ def analyze_food_image(image_path):
         print(f"🚨 圖片分析時發生錯誤: {str(e)}")
         return TextSendMessage(text="⚠️ 無法分析圖片，請稍後再試。")
 
-# 處理文字訊息
-@handler.add(MessageEvent, message=TextMessage)
+# 處理訊息事件
+@handler.add(MessageEvent)
 def handle_message(event):
-    """處理文字訊息事件"""
-    print(f"✅ 收到訊息：{event.message.text}")
-    message_text = event.message.text.strip()
-    
+    """處理所有類型的訊息事件"""
+    # 檢查消息是否已經處理過
+    if event.message.id in global_data_store["processed_messages"]:
+        print(f"⚠️ 跳過重複消息: {event.message.id}")
+        return "OK", 200
+
+    # 檢查是否有其他消息正在處理中
+    if global_data_store["message_lock"]:
+        print("⚠️ 另一個消息正在處理中，稍後重試")
+        return "OK", 200
+
     try:
-        # 檢索相關文本並生成回答
-        print(f"💬 處理一般文字訊息: {message_text}")
-        _, docs = search_related_content(retriever, message_text)
-        response = generate_answer(message_text, docs)
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
-    
+        # 設置消息鎖
+        global_data_store["message_lock"] = True
+        
+        if isinstance(event.message, TextMessage):
+            # 處理文字訊息
+            print(f"✅ 收到文字訊息：{event.message.text}")
+            message_text = event.message.text.strip()
+            
+            # 檢索相關文本並生成回答
+            print(f"💬 處理一般文字訊息: {message_text}")
+            _, docs = search_related_content(retriever, message_text)
+            response = generate_answer(message_text, docs)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
+            
+        elif isinstance(event.message, ImageMessage):
+            # 處理圖片訊息
+            print("✅ 收到圖片訊息")
+            handle_image_message(event)
+            
+        # 標記消息為已處理
+        global_data_store["processed_messages"].add(event.message.id)
+        
+        # 如果已處理消息數量超過1000，清理舊的記錄
+        if len(global_data_store["processed_messages"]) > 1000:
+            global_data_store["processed_messages"] = set(list(global_data_store["processed_messages"])[-1000:])
+            
     except LineBotApiError as e:
-        print(f"❌ Failed to reply message: {str(e)}")
+        print(f"❌ LINE API 錯誤: {str(e)}")
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="⚠️ 系統暫時無法處理您的訊息，請稍後再試。")
+            )
+        except:
+            pass
     except Exception as e:
-        print(f"❌ Error in handle_message: {str(e)}")
+        print(f"❌ 處理訊息時發生錯誤: {str(e)}")
         import traceback
         traceback.print_exc()
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="⚠️ 系統發生錯誤，請稍後再試。")
+            )
+        except:
+            pass
+    finally:
+        # 釋放消息鎖
+        global_data_store["message_lock"] = False
 
-# 處理圖片訊息
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
-    """處理圖片訊息事件"""
+def handle_image_message(event):
+    """處理圖片訊息"""
     try:
-        print("✅ 收到圖片訊息")
-        
         # 從 LINE 獲取圖片內容
         message_content = line_bot_api.get_message_content(event.message.id)
+        
+        # 創建臨時文件夾（如果不存在）
+        temp_dir = "temp_images"
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+        
+        # 保存圖片到臨時文件
+        image_path = os.path.join(temp_dir, f"{event.message.id}.jpg")
+        with open(image_path, "wb") as f:
+            for chunk in message_content.iter_content():
+                f.write(chunk)
+        
+        try:
+            # 分析圖片並獲取 Flex Message
+            flex_message = analyze_food_image(image_path)
+            
+            # 回覆 Flex Message
+            line_bot_api.reply_message(
+                event.reply_token,
+                flex_message
+            )
+            
+        finally:
+            # 確保無論如何都會刪除臨時文件
+            try:
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+            except Exception as e:
+                print(f"⚠️ 無法刪除臨時文件: {str(e)}")
+    
+    except LineBotApiError as e:
+        print(f"❌ LINE API 錯誤: {str(e)}")
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="⚠️ 圖片處理失敗，請稍後再試。")
+        )
+    except Exception as e:
+        print(f"❌ 處理圖片時發生錯誤: {str(e)}")
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="⚠️ 系統錯誤，請稍後再試。")
+        )
         
         # 創建臨時文件夾（如果不存在）
         temp_dir = "temp_images"
@@ -670,19 +1926,6 @@ def handle_image(event):
             TextSendMessage(text="⚠️ 系統錯誤，請稍後再試。")
         )
 
-def start_ngrok():
-    """啟動 ngrok 服務"""
-    try:
-        # 確保使用 HTTPS
-        public_url = ngrok.connect(port, bind_tls=True).public_url
-        print(f' * ngrok tunnel "{public_url}" -> "http://127.0.0.1:{port}" ')
-        print(f' * LINE Bot webhook URL: {public_url}/callback')
-        return public_url
-    except Exception as e:
-        print(f"⚠️ ngrok 啟動失敗: {str(e)}")
-        print("🔧 Bot 仍可以在本地運行，但需要手動設置外部連接")
-        return None
-
 if __name__ == "__main__":
     print("啟動糖尿病諮詢 LINE Bot")
     print("功能包含：")
@@ -691,8 +1934,8 @@ if __name__ == "__main__":
     print("   - Fast/Slow path 機制")
     print("   - 食物圖片分析")
     
-    # 在 Flask 啟動前先啟動 ngrok
-    public_url = start_ngrok()
+    # 從環境變數獲取端口號，如果沒有則使用預設值
+    port = int(os.environ.get('PORT', 5000))
     
     # 啟動 Flask 應用（生產環境中建議關閉 debug 模式）
     app.run(host="0.0.0.0", port=port, debug=False)

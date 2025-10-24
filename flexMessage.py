@@ -1,5 +1,4 @@
 from linebot.models import FlexSendMessage
-import json
 
 def generate_carousel_flex(elements):
     """
@@ -137,13 +136,13 @@ def generate_flex_message(title, food_name, data_dict):
                     "margin": "md"
                 }
             ],
-            "paddingAll": "20px"
+            "paddingAll": "10px"
         },
         "body": {
             "type": "box",
             "layout": "vertical",
             "contents": sections,
-            "paddingAll": "13px"
+            "paddingAll": "10px"
         },
         "footer": {
             "type": "box",
@@ -158,7 +157,7 @@ def generate_flex_message(title, food_name, data_dict):
                     "size": "xs"
                 }
             ],
-            "paddingAll": "13px"
+            "paddingAll": "10px"
         }
     }
     
@@ -166,41 +165,36 @@ def generate_flex_message(title, food_name, data_dict):
 
 def generate_calorie_source_flex_message(food_names, nutrition_data):
     """
-    生成熱量來源分析 Flex Message
+    生成簡潔的熱量來源分析 Flex Message
     
     Args:
         food_names: 食物名稱列表
-        nutrition_data: 營養數據，包含以下鍵：
-            - total_calories: 總熱量 (float, 單位: 大卡)
-            - carbs_calories: 碳水化合物熱量 (float, 單位: 大卡)
-            - protein_calories: 蛋白質熱量 (float, 單位: 大卡)
-            - fat_calories: 脂肪熱量 (float, 單位: 大卡)
-            - sugar_calories: 糖分熱量 (float, 單位: 大卡)
-            - is_estimated: 是否為估算值 (boolean)
-            
-    Returns:
-        FlexSendMessage 物件
+        nutrition_data: 營養數據字典
     """
-    # 計算百分比
-    total_calories = nutrition_data.get('total_calories', 0)
+    # 計算各營養素的克數和熱量
+    total_calories = round(nutrition_data.get('total_calories', 0))
     carbs_calories = nutrition_data.get('carbs_calories', 0)
     protein_calories = nutrition_data.get('protein_calories', 0)
     fat_calories = nutrition_data.get('fat_calories', 0)
     sugar_calories = nutrition_data.get('sugar_calories', 0)
     is_estimated = nutrition_data.get('is_estimated', False)
     
+    # 計算克數
+    carbs_grams = round(carbs_calories / 4, 1)
+    protein_grams = round(protein_calories / 4, 1)
+    fat_grams = round(fat_calories / 9, 1)
+    sugar_grams = round(sugar_calories / 4, 1)
+    
+    # 計算百分比（用於判斷是否過高）
     if total_calories > 0:
         carbs_percent = round(carbs_calories / total_calories * 100)
         protein_percent = round(protein_calories / total_calories * 100)
         fat_percent = round(fat_calories / total_calories * 100)
         sugar_percent = round(sugar_calories / total_calories * 100)
     else:
-        carbs_percent = 0
-        protein_percent = 0
-        fat_percent = 0
-        sugar_percent = 0
+        carbs_percent = protein_percent = fat_percent = sugar_percent = 0
     
-    # 創建食物清單字串
+    # 創建食物標題
     if len(food_names) > 1:
         food_title = "、".join(food_names[:3])
         if len(food_names) > 3:
@@ -208,349 +202,182 @@ def generate_calorie_source_flex_message(food_names, nutrition_data):
     else:
         food_title = food_names[0] if food_names else "食物"
     
-    # 顏色設定，確保在手機上能清楚顯示
-    color_settings = {
-        "carbs": {"bg": "#4A90E2", "text": "#0066CC", "name": "碳水化合物"},
-        "protein": {"bg": "#F5A623", "text": "#CC6600", "name": "蛋白質"},
-        "fat": {"bg": "#7ED321", "text": "#336633", "name": "脂肪"},
-        "sugar": {"bg": "#FF69B4", "text": "#FF1493", "name": "糖分"}
-    }
+    # 判斷各營養素是否過高並設定顏色
+    carbs_color = "#E53935" if carbs_percent > 65 else "#555555"
+    sugar_color = "#E53935" if sugar_percent > 20 else "#555555"
+    protein_color = "#FF8C00" if protein_percent > 35 else "#555555"
     
-    # 選擇前三大熱量來源
-    nutrient_data = [
-        {"name": color_settings["carbs"]["name"], "percent": carbs_percent, "calories": carbs_calories, 
-         "color": color_settings["carbs"]["bg"], "text_color": color_settings["carbs"]["text"], "type": "carbs"},
-         
-        {"name": color_settings["protein"]["name"], "percent": protein_percent, "calories": protein_calories, 
-         "color": color_settings["protein"]["bg"], "text_color": color_settings["protein"]["text"], "type": "protein"},
-         
-        {"name": color_settings["fat"]["name"], "percent": fat_percent, "calories": fat_calories, 
-         "color": color_settings["fat"]["bg"], "text_color": color_settings["fat"]["text"], "type": "fat"},
-         
-        {"name": color_settings["sugar"]["name"], "percent": sugar_percent, "calories": sugar_calories, 
-         "color": color_settings["sugar"]["bg"], "text_color": color_settings["sugar"]["text"], "type": "sugar"}
-    ]
-    
-    # 按熱量百分比排序，選出前三名
-    top_nutrients = sorted(nutrient_data, key=lambda x: x["percent"], reverse=True)[:3]
-    
-    # 視覺化總熱量計量表（最大值500卡）
-    max_calories = 500
-    calories_percent = min(round(total_calories / max_calories * 100), 100)
-    
-    # 設定熱量標題（如果是估算值，添加提示）
-    calorie_title = f"總熱量: {total_calories} 大卡"
-    if is_estimated:
-        calorie_title += " (估算值)"
-    
-    # 創建象形圖表示總熱量（使用文字圖標代替圖片URL）
-    flame_levels = min(5, max(1, round(calories_percent / 20)))
-    
-    # 使用文字表情符號表示火焰
-    flame_emoji = "🔥"
-    empty_flame = "⚪"
-    flame_text = ""
-    
-    for i in range(5):
-        if i < flame_levels:
-            flame_text += flame_emoji
-        else:
-            flame_text += empty_flame
-    
-    # 添加熱量圖示到容器
-    calorie_meter = {
-        "type": "box",
-        "layout": "vertical",
-        "contents": [
-            {
-                "type": "text",
-                "text": calorie_title,
-                "weight": "bold",
-                "size": "md",
-                "align": "center",
-                "margin": "md"
-            },
-            {
-                "type": "text",
-                "text": flame_text,
-                "align": "center",
-                "size": "xl",
-                "margin": "md"
-            },
-            {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "box",
-                        "layout": "vertical",
-                        "contents": [],
-                        "width": f"{calories_percent}%",
-                        "height": "12px",
-                        "backgroundColor": "#FF6B6E"
-                    }
-                ],
-                "backgroundColor": "#EEEEEE",
-                "height": "12px",
-                "margin": "md"
-            },
-            {
-                "type": "box",
-                "layout": "horizontal",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "0",
-                        "size": "xs",
-                        "color": "#555555"
-                    },
-                    {
-                        "type": "text",
-                        "text": "250",
-                        "size": "xs",
-                        "color": "#555555",
-                        "align": "center"
-                    },
-                    {
-                        "type": "text",
-                        "text": "500 大卡",
-                        "size": "xs",
-                        "color": "#555555",
-                        "align": "end"
-                    }
-                ],
-                "margin": "sm"
-            }
-        ],
-        "margin": "lg"
-    }
-    
-    # 創建熱量來源分析以條形圖表示
-    bar_contents = []
-    
-    # 添加標題
-    bar_contents.append({
-        "type": "text",
-        "text": "主要熱量來源分析",
-        "weight": "bold",
-        "size": "md",
-        "margin": "md"
-    })
-    
-    # 如果是估算值，添加提示信息
-    if is_estimated:
-        bar_contents.append({
-            "type": "text",
-            "text": "⚠️ 以下數據為AI估算值，僅供參考",
-            "size": "xs",
-            "color": "#FF6B6E",
-            "margin": "sm"
-        })
-    
-    # 為前三大熱量來源創建條形圖，確保最小寬度為5%以便在手機上顯示
-    for nutrient in top_nutrients:
-        # 確保條形圖至少有5%的寬度
-        display_percent = max(5, nutrient["percent"])
-        
-        bar_contents.append({
-            "type": "box",
-            "layout": "horizontal",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": nutrient["name"],
-                    "size": "sm",
-                    "color": nutrient["text_color"],
-                    "weight": "bold",
-                    "flex": 3
-                },
-                {
-                    "type": "text",
-                    "text": f"{nutrient['percent']}%",
-                    "size": "sm",
-                    "color": nutrient["text_color"],
-                    "align": "end",
-                    "weight": "bold",
-                    "flex": 1
-                }
-            ],
-            "margin": "md"
-        })
-        
-        # 確保手機上能看到條形圖顏色
-        bar_contents.append({
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text", 
-                            "text": " ", 
-                            "size": "xxs"
-                        }
-                    ],
-                    "height": "15px",
-                    "width": f"{display_percent}%",
-                    "backgroundColor": nutrient["color"]
-                }
-            ],
-            "backgroundColor": "#EEEEEE",
-            "height": "15px",
-            "margin": "sm",
-            "cornerRadius": "sm"
-        })
-    
-    bar_chart = {
-        "type": "box",
-        "layout": "vertical",
-        "contents": bar_contents,
-        "margin": "xl",
-        "paddingAll": "sm",
-        "backgroundColor": "#FFFFFF",
-        "cornerRadius": "md"
-    }
-    
-    # 獲取分析結果 (使用標準的碳水、蛋白質、脂肪分析)
-    std_carbs = next((item for item in nutrient_data if item["type"] == "carbs"), {"percent": 0})["percent"]
-    std_protein = next((item for item in nutrient_data if item["type"] == "protein"), {"percent": 0})["percent"]
-    std_fat = next((item for item in nutrient_data if item["type"] == "fat"), {"percent": 0})["percent"]
-    
-    analysis = get_calorie_source_analysis(std_carbs, std_protein, std_fat)
-    
-    # 如果糖分佔比高，添加糖分的特別提醒
+    # 生成營養警告
+    warnings = []
     if sugar_percent > 20:
-        sugar_warning = "⚠️ 糖分含量較高，糖尿病患者應特別注意。建議控制食用量，或以低糖替代食物。"
-        analysis = sugar_warning + "\n\n" + analysis
+        warnings.append("高糖分")
+    if carbs_percent > 65:
+        warnings.append("高碳水")
+    if protein_percent > 35:
+        warnings.append("高蛋白")
+    if fat_percent > 40:
+        warnings.append("高脂肪")
     
-    # 如果是估算值，添加提示
-    if is_estimated:
-        analysis = "📝 本分析基於AI估算的營養數據，僅供參考，實際數值可能有所不同。\n\n" + analysis
+    warning_text = " ".join(warnings) if warnings else "營養均衡"
+    warning_color = "#E53935" if warnings else "#1DB446"
     
     # 創建 Flex Message
     bubble = {
         "type": "bubble",
-        "size": "mega",
+        "size": "kilo",
         "header": {
             "type": "box",
             "layout": "vertical",
             "contents": [
                 {
                     "type": "text",
-                    "text": "熱量來源分析",
-                    "weight": "bold",
-                    "color": "#1DB446",
-                    "size": "sm"
-                },
-                {
-                    "type": "text",
                     "text": food_title,
                     "weight": "bold",
-                    "size": "xl",
-                    "margin": "md",
-                    "wrap": True
+                    "size": "lg",
+                    "wrap": True,
+                    "color": "#1A1A1A"
                 }
             ],
-            "paddingAll": "20px",
-            "backgroundColor": "#F9F9F9"
+            "paddingAll": "15px",
+            "backgroundColor": "#FFFFFF",
+            "borderColor": "#E0E0E0",
+            "borderWidth": "light",
+            "cornerRadius": "lg"
         },
         "body": {
             "type": "box",
             "layout": "vertical",
             "contents": [
-                calorie_meter,
-                bar_chart,
+                # 熱量顯示
                 {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": "糖尿病飲食建議",
-                            "weight": "bold",
-                            "size": "md"
-                        },
-                        {
-                            "type": "text",
-                            "text": analysis,
-                            "wrap": True,
-                            "color": "#666666",
-                            "size": "sm",
-                            "margin": "md"
-                        }
-                    ],
-                    "margin": "xl",
-                    "paddingAll": "sm",
-                    "backgroundColor": "#F9F9F9",
-                    "cornerRadius": "md"
-                }
-            ],
-            "paddingAll": "13px",
-            "backgroundColor": "#FFFFFF"
-        },
-        "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
-            "contents": [
-                {
-                    "type": "button",
-                    "style": "primary",
-                    "height": "sm",
-                    "action": {
-                        "type": "postback",
-                        "label": "查看詳細營養資訊",
-                        "data": f"detailed_calorie_source:{','.join(food_names)}"
-                    },
-                    "color": "#1DB446"
+                    "type": "text",
+                    "text": f"{total_calories}",
+                    "weight": "bold",
+                    "size": "3xl",
+                    "align": "center"
                 },
                 {
                     "type": "text",
-                    "text": "數據來源：FatSecret營養資料庫" + (" + AI估算" if is_estimated else ""),
-                    "wrap": True,
-                    "color": "#aaaaaa",
-                    "size": "xs",
-                    "margin": "md",
-                    "align": "center"
+                    "text": "大卡",
+                    "size": "sm",
+                    "color": "#999999",
+                    "align": "center",
+                    "margin": "sm"
+                },
+                # 營養成分
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "margin": "xl",
+                    "spacing": "lg",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "horizontal",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "碳水化合物",
+                                    "size": "md",
+                                    "color": "#999999",
+                                    "flex": 3
+                                },
+                                {
+                                    "type": "text",
+                                    "text": f"{carbs_grams}g",
+                                    "size": "md",
+                                    "color": carbs_color,
+                                    "align": "end",
+                                    "weight": "bold",
+                                    "flex": 2
+                                }
+                            ]
+                        },
+                        {
+                            "type": "box",
+                            "layout": "horizontal",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "糖分",
+                                    "size": "md",
+                                    "color": "#999999",
+                                    "flex": 3
+                                },
+                                {
+                                    "type": "text",
+                                    "text": f"{sugar_grams}g",
+                                    "size": "md",
+                                    "color": sugar_color,
+                                    "align": "end",
+                                    "weight": "bold",
+                                    "flex": 2
+                                }
+                            ]
+                        },
+                        {
+                            "type": "box",
+                            "layout": "horizontal",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "蛋白質",
+                                    "size": "md",
+                                    "color": "#999999",
+                                    "flex": 3
+                                },
+                                {
+                                    "type": "text",
+                                    "text": f"{protein_grams}g",
+                                    "size": "md",
+                                    "color": protein_color,
+                                    "align": "end",
+                                    "weight": "bold",
+                                    "flex": 2
+                                }
+                            ]
+                        }
+                    ]
+                },
+                # 分隔線
+                {
+                    "type": "separator",
+                    "margin": "xl",
+                    "color": "#E0E0E0"
+                },
+                # 飲食建議
+                {
+                    "type": "text",
+                    "text": warning_text,
+                    "weight": "bold",
+                    "size": "lg",
+                    "margin": "lg",
+                    "align": "center",
+                    "color": warning_color
                 }
             ],
-            "paddingAll": "13px",
-            "backgroundColor": "#F9F9F9"
+            "paddingAll": "15px",
+            "backgroundColor": "#FFFFFF"
         },
         "styles": {
             "header": {
                 "separator": True
             },
-            "footer": {
-                "separator": True
+            "body": {
+                "backgroundColor": "#FFFFFF"
             }
         }
     }
     
-    # 將 bubble 直接包裝為 FlexSendMessage 並返回
-    return FlexSendMessage(alt_text=f"{food_title} 的熱量來源分析", contents=bubble)
-
-def get_calorie_source_analysis(carbs_percent, protein_percent, fat_percent):
-    """
-    根據熱量來源分析給出針對糖尿病患者的簡潔建議
+    # 如果是估算值，添加提示
+    if is_estimated:
+        bubble["body"]["contents"].append({
+            "type": "text",
+            "text": "(AI估算值)",
+            "size": "xs",
+            "color": "#999999",
+            "align": "center",
+            "margin": "md"
+        })
     
-    Args:
-        carbs_percent: 碳水化合物熱量百分比
-        protein_percent: 蛋白質熱量百分比
-        fat_percent: 脂肪熱量百分比
-    """
-    # 判斷主要營養素比例並給出簡潔建議
-    if carbs_percent > 65:
-        return "💡 碳水化合物占比較高，建議搭配蛋白質食用以穩定血糖。\n⚠️ 糖尿病患者應控制份量，避免血糖快速上升。"
-    elif carbs_percent < 30:
-        return "💡 碳水化合物含量較低，有助於血糖穩定。\n✅ 適合糖尿病患者，建議搭配適量蔬菜增加纖維。"
-    elif protein_percent > 35:
-        return "💡 蛋白質含量豐富，有助於延緩血糖上升。\n⚠️ 注意腎功能狀況，避免過量攝取。"
-    elif fat_percent > 40:
-        return "💡 脂肪含量較高，雖不直接影響血糖但熱量密度高。\n⚠️ 建議控制份量，選擇健康油脂如橄欖油、堅果。"
-    else:
-        return "💡 營養比例均衡，適合糖尿病患者食用。\n✅ 建議定時定量，搭配血糖監測更安心。"
-
-
+    return FlexSendMessage(alt_text=f"{food_title} 的營養分析", contents=bubble)
