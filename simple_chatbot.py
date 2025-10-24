@@ -48,19 +48,11 @@ model = genai.GenerativeModel("gemini-2.5-flash-lite", generation_config=generat
 EMBED_MODEL_NAME = "DMetaSoul/sbert-chinese-general-v2"
 SAS_MODEL_DIR = os.path.join(os.path.dirname(__file__), "sas_model")
 
-# 載入 SAS 模型參數
-with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
-    SAS_PARAMS = json.load(f)
-
 # 初始化 SAS 模型
-sas_model = CrossEncoder(SAS_MODEL_DIR)
-sas_model.model = sas_model.model.to("cpu")  # 預設使用 CPU
-
-# 從 Hugging Face 加載 SAS 模型（替換上面的本地加載）
 try:
     print("⏳ 正在從 Hugging Face 加載 SAS 模型...")
     sas_model = CrossEncoder("Pkaser2323/SAS_Model", device="cpu")
-    print("✅ SAS 模型加載成功！")
+    print("✅ 從 Hugging Face 加載 SAS 模型成功！")
     
     # 嘗試從 Hugging Face 加載參數
     try:
@@ -71,15 +63,54 @@ try:
         )
         with open(params_path, "r", encoding="utf-8") as f:
             SAS_PARAMS = json.load(f)
-        print("✅ SAS 參數加載成功！")
+        print("✅ 從 Hugging Face 加載參數成功！")
     except Exception as e:
         print(f"⚠️ 無法從 Hugging Face 加載參數: {str(e)}")
-        SAS_PARAMS = {"temperature": 2.0, "high_threshold": 0.6, "low_threshold": 0.3}
+        print("⏳ 嘗試從本地加載參數...")
+        try:
+            with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
+                SAS_PARAMS = json.load(f)
+            print("✅ 從本地加載參數成功！")
+        except Exception as e2:
+            print(f"⚠️ 無法從本地加載參數: {str(e2)}")
+            SAS_PARAMS = {
+                "temperature": 2.0,
+                "high_threshold": 0.6,
+                "low_threshold": 0.3
+            }
+            print("✅ 使用預設參數")
         
 except Exception as e:
-    print(f"❌ 加載 SAS 模型失敗: {str(e)}")
-    sas_model = None
-    SAS_PARAMS = {"temperature": 2.0, "high_threshold": 0.6, "low_threshold": 0.3}
+    print(f"⚠️ 無法從 Hugging Face 加載模型: {str(e)}")
+    print("⏳ 嘗試從本地加載模型...")
+    try:
+        sas_model = CrossEncoder(SAS_MODEL_DIR)
+        sas_model.model = sas_model.model.to("cpu")
+        print("✅ 從本地加載模型成功！")
+        
+        # 嘗試從本地加載參數
+        try:
+            with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
+                SAS_PARAMS = json.load(f)
+            print("✅ 從本地加載參數成功！")
+        except Exception as e2:
+            print(f"⚠️ 無法從本地加載參數: {str(e2)}")
+            SAS_PARAMS = {
+                "temperature": 2.0,
+                "high_threshold": 0.6,
+                "low_threshold": 0.3
+            }
+            print("✅ 使用預設參數")
+    except Exception as e2:
+        print(f"❌ 本地模型加載也失敗: {str(e2)}")
+        print("⚠️ 將以降級模式運行（不使用 SAS 模型）")
+        sas_model = None
+        SAS_PARAMS = {
+            "temperature": 2.0,
+            "high_threshold": 0.6,
+            "low_threshold": 0.3
+        }
+
 
 def predict_pos_prob(
     model,
