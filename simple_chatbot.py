@@ -56,6 +56,31 @@ with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8"
 sas_model = CrossEncoder(SAS_MODEL_DIR)
 sas_model.model = sas_model.model.to("cpu")  # 預設使用 CPU
 
+# 從 Hugging Face 加載 SAS 模型（替換上面的本地加載）
+try:
+    print("⏳ 正在從 Hugging Face 加載 SAS 模型...")
+    sas_model = CrossEncoder("Pkaser2323/SAS_Model", device="cpu")
+    print("✅ SAS 模型加載成功！")
+    
+    # 嘗試從 Hugging Face 加載參數
+    try:
+        from huggingface_hub import hf_hub_download
+        params_path = hf_hub_download(
+            repo_id="Pkaser2323/SAS_Model",
+            filename="best_params.json"
+        )
+        with open(params_path, "r", encoding="utf-8") as f:
+            SAS_PARAMS = json.load(f)
+        print("✅ SAS 參數加載成功！")
+    except Exception as e:
+        print(f"⚠️ 無法從 Hugging Face 加載參數: {str(e)}")
+        SAS_PARAMS = {"temperature": 2.0, "high_threshold": 0.6, "low_threshold": 0.3}
+        
+except Exception as e:
+    print(f"❌ 加載 SAS 模型失敗: {str(e)}")
+    sas_model = None
+    SAS_PARAMS = {"temperature": 2.0, "high_threshold": 0.6, "low_threshold": 0.3}
+
 def predict_pos_prob(
     model,
     questions: List[str],
@@ -63,6 +88,11 @@ def predict_pos_prob(
     temperature: float = 2.0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """預測正類機率"""
+    # 模型檢查
+    if model is None:
+        print("⚠️ SAS 模型未加載，返回預設分數")
+        return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
+    
     # 空輸入檢查
     if not questions or not answers or len(questions) != len(answers):
         return np.array([]), np.array([])
