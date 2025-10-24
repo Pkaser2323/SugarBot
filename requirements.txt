@@ -1,11 +1,18 @@
-python-dotenv==1.0.0
-Flask==3.0.0
-line-bot-sdk==3.7.0
-langchain-huggingface==0.3.1
+Flask==3.0.3
+gunicorn==21.2.0
+python-dotenv==1.0.1
+line-bot-sdk==3.11.0
+
+# LangChain 生態
 langchain-community==0.3.1
-google-generativeai==0.3.2
-sentence-transformers==2.2.2
-torch==2.5.0
-numpy==1.26.3
-Pillow==10.2.0
-faiss-cpu==1.7.4
+langchain-huggingface==0.3.1
+
+# 向量/ML
+faiss-cpu==1.8.0.post1
+sentence-transformers==3.0.1
+torch==2.3.1
+numpy==1.26.4
+Pillow==10.4.0
+
+# Gemini
+google-generativeai==0.8.2
