@@ -1687,27 +1687,33 @@ def handle_follow(event):
 @handler.add(MessageEvent)
 def handle_message(event):
     """處理所有類型的訊息事件"""
-    user_id = event.source.user_id
+    # 檢查消息是否已經處理過
+    if event.message.id in global_data_store["processed_messages"]:
+        print(f"⚠️ 跳過重複消息: {event.message.id}")
+        return
     
-    if isinstance(event.message, TextMessage):
-        msg = event.message.text
-        print(f"收到: {msg}")
+    try:
+        user_id = event.source.user_id
         
-        # 檢查是否已經同意
-        if user_id not in user_consent:
-            # 新用戶 → 發送專業的條款頁面
-            flex_message = create_terms_flex_message()
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(
-                alt_text=flex_message["altText"],
-                contents=flex_message["contents"]
-            ))
-            user_consent[user_id] = {
-                "status": "pending",
-                "first_contact": datetime.now().isoformat(),
-                "blood_sugar_records": []
-            }
-            save_user_data(user_consent)
-            return
+        if isinstance(event.message, TextMessage):
+            msg = event.message.text.strip()
+            print(f"收到: {msg}")
+            
+            # 檢查是否已經同意
+            if user_id not in user_consent:
+                # 新用戶 → 發送專業的條款頁面
+                flex_message = create_terms_flex_message()
+                line_bot_api.reply_message(event.reply_token, FlexSendMessage(
+                    alt_text=flex_message["altText"],
+                    contents=flex_message["contents"]
+                ))
+                user_consent[user_id] = {
+                    "status": "pending",
+                    "first_contact": datetime.now().isoformat(),
+                    "blood_sugar_records": []
+                }
+                save_user_data(user_consent)
+                return
 
         elif user_consent[user_id].get("status") == "pending":
             # 等待用戶回覆
@@ -1829,14 +1835,19 @@ def handle_message(event):
                 ))
                 user_consent[user_id]["status"] = "tutorial_shown"
                 save_user_data(user_consent)
-                return
             else:
                 # 檢索相關文本並生成回答
                 print(f"💬 處理一般文字訊息: {msg}")
                 _, docs = search_related_content(retriever, msg)
                 response = generate_answer(msg, docs)
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
-                return
+            
+            # 標記消息為已處理
+            global_data_store["processed_messages"].add(event.message.id)
+            # 如果已處理消息數量超過1000，清理舊的記錄
+            if len(global_data_store["processed_messages"]) > 1000:
+                global_data_store["processed_messages"] = set(list(global_data_store["processed_messages"])[-1000:])
+            return
         elif user_consent[user_id].get("status") == "disagreed":
             reply = "由於您尚未同意服務條款，目前無法使用糖小護的功能。\n\n如果您想重新開始，請輸入「重新開始」。"
             if msg == "重新開始":
