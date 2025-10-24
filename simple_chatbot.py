@@ -1671,25 +1671,6 @@ def analyze_food_image(image_path):
 @handler.add(FollowEvent)
 def handle_follow(event):
     """處理加好友事件"""
-    user_id = event.source.user_id
-    
-    # 新用戶加入 → 發送專業的條款頁面
-    flex_message = create_terms_flex_message()
-    line_bot_api.reply_message(event.reply_token, FlexSendMessage(
-        alt_text=flex_message["altText"],
-        contents=flex_message["contents"]
-    ))
-    user_consent[user_id] = {
-        "status": "pending",
-        "first_contact": datetime.now().isoformat(),
-        "blood_sugar_records": []
-    }
-    save_user_data(user_consent)
-
-# 處理加好友事件
-@handler.add(FollowEvent)
-def handle_follow(event):
-    """處理加好友事件"""
     try:
         user_id = event.source.user_id
         print(f"✨ 新用戶加入: {user_id}")
@@ -2117,48 +2098,6 @@ def handle_image_message(event):
             except Exception as e:
                 print(f"⚠️ 無法刪除臨時文件: {str(e)}")
     
-    except LineBotApiError as e:
-        print(f"❌ LINE API 錯誤: {str(e)}")
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="⚠️ 圖片處理失敗，請稍後再試。")
-        )
-    except Exception as e:
-        print(f"❌ 處理圖片時發生錯誤: {str(e)}")
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="⚠️ 系統錯誤，請稍後再試。")
-        )
-        
-        # 創建臨時文件夾（如果不存在）
-        temp_dir = "temp_images"
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
-        
-        # 保存圖片到臨時文件
-        image_path = os.path.join(temp_dir, f"{event.message.id}.jpg")
-        with open(image_path, "wb") as f:
-            for chunk in message_content.iter_content():
-                f.write(chunk)
-        
-        try:
-            # 分析圖片並獲取 Flex Message
-            flex_message = analyze_food_image(image_path)
-            
-            # 回覆 Flex Message
-            line_bot_api.reply_message(
-                event.reply_token,
-                flex_message
-            )
-            
-        finally:
-            # 確保無論如何都會刪除臨時文件
-            try:
-                if os.path.exists(image_path):
-                    os.remove(image_path)
-            except Exception as e:
-                print(f"⚠️ 無法刪除臨時文件: {str(e)}")
-        
     except LineBotApiError as e:
         print(f"❌ LINE API 錯誤: {str(e)}")
         line_bot_api.reply_message(
