@@ -33,6 +33,9 @@ API_KEY = os.environ.get("GOOGLE_API_KEY")
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
 LINE_SECRET = os.environ.get("LINE_SECRET")
 
+# 設置 tokenizers 並行處理
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 避免 fork 後的死鎖問題
+
 # Configure Gemini AI
 genai.configure(api_key=API_KEY)
 
