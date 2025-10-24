@@ -513,6 +513,12 @@ try:
 except Exception as e:
     print(f"❌ LINE API setup error: {str(e)}")
 
+# 根路徑
+@app.route("/", methods=["GET"])
+def root():
+    """根路徑處理"""
+    return "糖尿病諮詢 LINE Bot 服務正在運行中", 200
+
 # 健康檢查路由
 @app.route("/health", methods=["GET"])
 def health_check():
@@ -537,7 +543,8 @@ def init_models():
     }), 200
 
 # LINE Bot webhook
-@app.route("/callback", methods=['POST'])
+@app.route("/", methods=['POST'])  # 改為根路徑
+@app.route("/callback", methods=['POST'])  # 保留 /callback 以向後兼容
 def callback():
     body = request.get_data(as_text=True)
     try:
@@ -1363,7 +1370,7 @@ def create_voice_tutorial_carousel():
                     "type": "bubble",
                     "hero": {
                         "type": "image",
-                        "url": "https://your-image-host.com/voice-step1.jpg",
+                        "url": "https://i.postimg.cc/56xSYYbr/voice1.png",
                         "size": "full",
                         "aspectRatio": "20:13",
                         "aspectMode": "cover"
@@ -1396,7 +1403,7 @@ def create_voice_tutorial_carousel():
                     "type": "bubble",
                     "hero": {
                         "type": "image",
-                        "url": "https://your-image-host.com/voice-step2.jpg",
+                        "url": "https://i.postimg.cc/1f9rnnsY/voice2.png",
                         "size": "full",
                         "aspectRatio": "20:13",
                         "aspectMode": "cover"
@@ -1429,7 +1436,7 @@ def create_voice_tutorial_carousel():
                     "type": "bubble",
                     "hero": {
                         "type": "image",
-                        "url": "https://your-image-host.com/voice-step3.jpg",
+                        "url": "https://i.postimg.cc/svV4QQsH/voice3.png",
                         "size": "full",
                         "aspectRatio": "20:13",
                         "aspectMode": "cover"
