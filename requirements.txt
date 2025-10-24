@@ -7,7 +7,7 @@ line-bot-sdk==3.11.0
 langchain-community==0.3.1
 langchain-huggingface==0.3.1
 langchain-core==0.3.79
-langsmith==0.1.125
+
 
 # 向量/ML
 faiss-cpu==1.9.0.post1
