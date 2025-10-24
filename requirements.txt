@@ -5,7 +5,7 @@ line-bot-sdk==3.11.0
 
 # LangChain 生態
 langchain-core==0.3.79
-langchain-community==0.3.1
+langchain-community==0.3.31
 langchain-huggingface==0.3.1
 langsmith==0.4.38
 # 向量/ML
