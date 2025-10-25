@@ -126,18 +126,24 @@ def predict_pos_prob(
     temperature: float = 2.0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """預測正類機率"""
+    global sas_model, is_model_ready
+    
     # 空輸入檢查
     if not questions or not answers or len(questions) != len(answers):
         return np.array([]), np.array([])
     
-    # 模型就緒檢查
-    if not is_model_ready:
-        print("⚠️ SAS 模型尚未就緒，返回預設分數")
-        return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
+    # 延遲載入：首次使用時才初始化 SAS 模型
+    if not is_model_ready and not model_init_error:
+        print("⏳ 首次評分，正在初始化 SAS 模型...")
+        try:
+            initialize_sas_model()
+        except Exception as e:
+            print(f"❌ SAS 模型初始化失敗: {str(e)}")
+            return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
     
-    # 模型存在檢查
-    if model is None:
-        print("⚠️ SAS 模型未加載，返回預設分數")
+    # 模型就緒檢查
+    if not is_model_ready or model is None:
+        print("⚠️ SAS 模型未就緒，返回預設分數")
         return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
     
     # 過濾無效輸入
@@ -362,12 +368,33 @@ def search_related_content(query):
         Tuple[str, List]: (合併後的文本, 文檔列表)
     """
     global vector_db
-    if not vector_db:
-        print("⚠️ 向量資料庫尚未初始化")
-        return "", []
+    
+    try:
+        # 延遲載入：首次使用時才初始化向量資料庫
+        if not vector_db:
+            print("⏳ 首次查詢，正在初始化向量資料庫...")
+            db_path = initialize_vector_db()  # 只檢查文件或創建文件
+            
+            # 創建嵌入模型
+            model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
+            embeddings = HuggingFaceEmbeddings(
+                model_name=EMBED_MODEL_NAME,
+                model_kwargs=model_kwargs
+            )
+            
+            # 載入向量資料庫
+            vector_db = FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
+            print("✅ 向量資料庫初始化完成")
         
-    docs = vector_db.invoke(query)
-    return "\n---\n".join([doc.page_content for doc in docs]), docs
+        # 執行檢索
+        docs = vector_db.invoke(query)
+        return "\n---\n".join([doc.page_content for doc in docs]), docs
+        
+    except Exception as e:
+        print(f"❌ 檢索過程發生錯誤: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return "", []
 
 def generate_answer(query: str, docs=None):
     """生成回答，使用 Fast/Slow path 機制"""
@@ -560,7 +587,7 @@ initialized = False
 
 def initialize_app():
     """初始化應用程式（只在第一次啟動時執行）"""
-    global line_bot_api, handler, vector_db, initialized, sas_model, is_model_ready
+    global line_bot_api, handler, initialized
     
     if initialized:
         return
@@ -576,21 +603,18 @@ def initialize_app():
         handler = WebhookHandler(LINE_SECRET)
         print("✅ LINE Bot API 初始化成功")
         
-        # 初始化向量資料庫
-        print("⏳ 初始化向量資料庫...")
-        vector_db = generate_retriever()
-        print("✅ 向量資料庫初始化成功")
-        
-        # 初始化 SAS 模型
-        print("⏳ 初始化 SAS 模型...")
-        initialize_sas_model()
-        if not is_model_ready:
-            print("⚠️ SAS 模型初始化失敗，將使用降級模式運行")
-        print("✅ SAS 模型初始化完成")
+        # 檢查必要文件是否存在
+        print("⏳ 檢查必要文件...")
+        db_dir = "/tmp/vector_DB" if os.environ.get("RENDER") else os.path.join(os.path.dirname(__file__), "vector_DB")
+        db_path = os.path.join(db_dir, "diabetes_comprehensive_db")
+        if not os.path.exists(db_path) or not os.path.exists(os.path.join(db_path, "index.faiss")):
+            print("⚠️ 向量資料庫文件不存在，將在首次查詢時創建")
+        else:
+            print("✅ 向量資料庫文件檢查完成")
         
         # 標記初始化完成
         initialized = True
-        print("✅ 應用程式初始化完成")
+        print("✅ 基礎應用程式初始化完成")
         
     except Exception as e:
         print(f"❌ 應用程式初始化失敗: {str(e)}")
@@ -600,6 +624,25 @@ def initialize_app():
 
 # 在應用程式啟動時初始化
 initialize_app()
+
+# 在另一個線程中預載 SAS 模型
+import threading
+def preload_sas_model():
+    """在背景線程中預載 SAS 模型"""
+    try:
+        print("⏳ 在背景預載 SAS 模型...")
+        import requests
+        response = requests.get("http://localhost:5000/init")
+        if response.status_code == 200:
+            print("✅ SAS 模型預載請求已發送")
+        else:
+            print(f"⚠️ SAS 模型預載請求失敗: {response.status_code}")
+    except Exception as e:
+        print(f"⚠️ 無法預載 SAS 模型: {str(e)}")
+
+# 啟動背景預載
+if not os.environ.get("RENDER"):  # 本地開發環境
+    threading.Thread(target=preload_sas_model, daemon=True).start()
 
 # 根路徑
 @app.route("/", methods=["GET"])
@@ -612,7 +655,14 @@ def root():
             return "糖尿病諮詢 LINE Bot 服務初始化完成", 200
         except:
             return "糖尿病諮詢 LINE Bot 服務初始化失敗", 500
-    return "糖尿病諮詢 LINE Bot 服務正在運行中", 200
+    
+    # 在回應中包含模型狀態
+    status = {
+        "service": "running",
+        "sas_model": "ready" if is_model_ready else "not_ready",
+        "error": model_init_error if model_init_error else None
+    }
+    return json.dumps(status, ensure_ascii=False), 200
 
 # 健康檢查路由
 @app.route("/health", methods=["GET"])
@@ -628,9 +678,22 @@ def health_check():
 # 初始化路由
 @app.route("/init", methods=["GET"])
 def init_models():
-    """初始化模型（非阻塞）"""
-    if not is_model_ready and not model_init_error:
-        initialize_sas_model()
+    """初始化 SAS 模型（在應用程式啟動後立即調用）"""
+    global is_model_ready, model_init_error
+    
+    try:
+        if not is_model_ready and not model_init_error:
+            print("⏳ 預先初始化 SAS 模型...")
+            initialize_sas_model()
+            if is_model_ready:
+                print("✅ SAS 模型初始化成功，已準備好進行評分")
+            else:
+                print("⚠️ SAS 模型初始化未完成")
+    except Exception as e:
+        print(f"❌ SAS 模型初始化失敗: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    
     return json.dumps({
         "status": "success" if is_model_ready else "initializing",
         "model_ready": is_model_ready,
