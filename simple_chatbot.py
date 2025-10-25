@@ -83,8 +83,7 @@ def initialize_sas_model():
             # 加載模型
             sas_model = CrossEncoder(
                 "Pkaser2323/SAS_Model",
-                device="cpu",
-                use_auth_token=hf_token if hf_token else None
+                device="cpu"
             )
             print("✅ 從 Hugging Face 加載 SAS 模型成功！")
             
@@ -296,7 +295,10 @@ def initialize_vector_db():
         db_dir = "/tmp/vector_DB"
     else:
         db_dir = os.path.join(base_dir, "vector_DB")
-        csv_path = os.path.join(base_dir, "datacsv", "a_topic_analyzed_processed.csv")
+    
+    # 設置資料庫和 CSV 路徑
+    db_path = os.path.join(db_dir, "diabetes_comprehensive_db")
+    csv_path = os.path.join(base_dir, "datacsv", "a_topic_analyzed_processed.csv")
     
     print(f"向量資料庫路徑: {db_path}")
     print(f"CSV 文件路徑: {csv_path}")
@@ -873,10 +875,10 @@ def load_user_data():
         if not os.access(USER_DATA_FILE, os.R_OK):
             print(f"⚠️ 無法讀取用戶數據文件（權限問題）: {USER_DATA_FILE}")
             return {}
-            
+        
         # 讀取文件
-            with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+        with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
             
         # 驗證數據格式
         if not isinstance(data, dict):
@@ -2101,11 +2103,6 @@ def handle_message(event):
                     user_consent[user_id]["status"] = "agreed"
                     save_user_data(user_consent)
                     
-            elif status == "detailed_tutorial":
-                # 用戶看完詳細教學，進入正常使用狀態
-                user_consent[user_id]["status"] = "agreed"
-                save_user_data(user_consent)
-                
             # 處理一般功能（已同意用戶）
             if status == "agreed":
                 if msg == "教學" or msg == "功能介紹":
@@ -2116,6 +2113,7 @@ def handle_message(event):
                     ))
                     user_consent[user_id]["status"] = "tutorial_shown"
                     save_user_data(user_consent)
+                    return
                 else:
                     # 使用 RAG 生成回答
                     print(f"💬 處理一般文字訊息: {msg}")
@@ -2123,6 +2121,42 @@ def handle_message(event):
                     response = generate_answer(msg, docs)
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
                     return
+            elif status == "tutorial_shown":
+                if msg in ["問答教學", "語音教學", "血糖教學", "影像教學"]:
+                    tutorial_carousels = {
+                        "問答教學": create_qa_tutorial_carousel(),
+                        "語音教學": create_voice_tutorial_carousel(),
+                        "血糖教學": create_blood_sugar_tutorial_carousel(),
+                        "影像教學": create_image_tutorial_carousel()
+                    }
+                    selected_carousel = tutorial_carousels[msg]
+                    line_bot_api.reply_message(event.reply_token, FlexSendMessage(
+                        alt_text=selected_carousel["altText"],
+                        contents=selected_carousel["contents"]
+                    ))
+                    user_consent[user_id]["status"] = "detailed_tutorial"
+                    save_user_data(user_consent)
+                    return
+                else:
+                    # 如果不是教學相關指令，轉為一般模式
+                    user_consent[user_id]["status"] = "agreed"
+                    save_user_data(user_consent)
+                    # 使用 RAG 生成回答
+                    print(f"💬 處理一般文字訊息: {msg}")
+                    _, docs = search_related_content(msg)
+                    response = generate_answer(msg, docs)
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
+                    return
+            elif status == "detailed_tutorial":
+                # 看完詳細教學後，轉為一般模式
+                user_consent[user_id]["status"] = "agreed"
+                save_user_data(user_consent)
+                # 使用 RAG 生成回答
+                print(f"💬 處理一般文字訊息: {msg}")
+                _, docs = search_related_content(msg)
+                response = generate_answer(msg, docs)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
+                return
                 
             elif status == "disagreed":
                 if msg == "重新開始":
