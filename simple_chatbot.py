@@ -12,7 +12,7 @@ from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, ImageMessage,
     FlexSendMessage, PostbackEvent, PostbackAction,
     QuickReply, QuickReplyButton, MessageAction,
-    FollowEvent, UnfollowEvent  # 添加好友和解除好友事件
+    FollowEvent, UnfollowEvent
 )
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -92,7 +92,7 @@ def initialize_sas_model():
                 print(f"⚠️ 無法從本地加載參數: {str(e2)}")
                 # 使用預設參數
                 print("✅ 使用預設參數")
-            
+
     except Exception as e:
         print(f"⚠️ 無法從 Hugging Face 加載模型: {str(e)}")
         print("⏳ 嘗試從本地加載模型...")
@@ -556,6 +556,7 @@ def callback():
     
     try:
         handler.handle(body, signature)
+        return "OK", 200
     except InvalidSignatureError:
         print("無效的簽名")
         return "Invalid signature", 400
@@ -563,8 +564,6 @@ def callback():
         print(f"處理 Webhook 時發生錯誤: {str(e)}")
         print(f"收到內容: {body}")
         return "Error", 500
-        
-    return "OK", 200
 
 # 用戶數據文件路徑
 USER_DATA_FILE = "user_data.json"
@@ -1671,49 +1670,49 @@ def analyze_food_image(image_path):
 @handler.add(FollowEvent)
 def handle_follow(event):
     """處理加好友事件"""
-    try:
-        user_id = event.source.user_id
-        print(f"✨ 新用戶加入: {user_id}")
-        
-        # 發送條款頁面
-        flex_message = create_terms_flex_message()
-        line_bot_api.reply_message(event.reply_token, FlexSendMessage(
-            alt_text=flex_message["altText"],
-            contents=flex_message["contents"]
-        ))
-        
-        # 初始化用戶數據
-        user_consent[user_id] = {
-            "status": "pending",
-            "first_contact": datetime.now().isoformat(),
-            "blood_sugar_records": []
-        }
-        save_user_data(user_consent)
-        
-    except Exception as e:
-        print(f"❌ 處理加好友事件時發生錯誤: {str(e)}")
+    user_id = event.source.user_id
+    
+    # 新用戶加入 → 發送專業的條款頁面
+    flex_message = create_terms_flex_message()
+    line_bot_api.reply_message(event.reply_token, FlexSendMessage(
+        alt_text=flex_message["altText"],
+        contents=flex_message["contents"]
+    ))
+    user_consent[user_id] = {
+        "status": "pending",
+        "first_contact": datetime.now().isoformat(),
+        "blood_sugar_records": []
+    }
+    save_user_data(user_consent)
 
 # 處理訊息事件
 @handler.add(MessageEvent)
 def handle_message(event):
     """處理所有類型的訊息事件"""
-    message_id = event.message.id
-    user_id = event.source.user_id
-    
     # 檢查消息是否已經處理過
-    if message_id in global_data_store["processed_messages"]:
-        print(f"⚠️ 跳過重複消息: {message_id}")
+    if event.message.id in global_data_store["processed_messages"]:
+        print(f"⚠️ 跳過重複消息: {event.message.id}")
         return
-        
+    
     try:
+        # 檢查是否有其他消息正在處理中
+        if global_data_store["message_lock"]:
+            print("⚠️ 另一個消息正在處理中，稍後重試")
+            return
+        
+        # 設置消息鎖
+        global_data_store["message_lock"] = True
+        
+        user_id = event.source.user_id
+        
         # 處理不同類型的消息
         if isinstance(event.message, TextMessage):
             msg = event.message.text.strip()
-            print(f"📝 收到文字訊息: {msg}")
+            print(f"收到: {msg}")
             
-            # 檢查用戶狀態
+            # 檢查是否已經同意
             if user_id not in user_consent:
-                # 新用戶 → 發送條款頁面
+                # 新用戶 → 發送專業的條款頁面
                 flex_message = create_terms_flex_message()
                 line_bot_api.reply_message(event.reply_token, FlexSendMessage(
                     alt_text=flex_message["altText"],
@@ -1726,7 +1725,7 @@ def handle_message(event):
                 }
                 save_user_data(user_consent)
                 return
-                
+            
             # 根據用戶狀態處理消息
             status = user_consent[user_id].get("status", "pending")
             
@@ -1745,15 +1744,18 @@ def handle_message(event):
                     user_consent[user_id]["status"] = "awaiting_button_response"
                     user_consent[user_id]["agreed_time"] = datetime.now().isoformat()
                     save_user_data(user_consent)
+                    return
                 elif msg == "不同意":
                     reply = "感謝您的回覆。如果您改變心意，歡迎隨時重新開始對話。\n\n為了保護您的隱私，我們將不會保存任何資料。"
                     user_consent[user_id]["status"] = "disagreed"
                     user_consent[user_id]["disagreed_time"] = datetime.now().isoformat()
                     save_user_data(user_consent)
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+                    return
                 else:
                     reply = "請點選條款頁面中的「同意並開始使用」或「暫不同意」按鈕，或直接回覆「同意」或「不同意」。"
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+                    return
                     
             elif status == "awaiting_button_response":
                 # 處理按鈕確認回應
@@ -1762,12 +1764,15 @@ def handle_message(event):
                     line_bot_api.reply_message(event.reply_token, tutorial_choice_message)
                     user_consent[user_id]["status"] = "awaiting_tutorial_choice"
                     save_user_data(user_consent)
+                    return
                 elif msg == "沒有":
                     reply = "沒關係！我們來說明一下：\n\n在我的訊息下方，您會看到一些按鈕，這些按鈕可以幫助您快速選擇回應。\n\n如果您現在看到了，請回覆「有」；如果還是沒看到，請回覆「沒有」。"
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+                    return
                 else:
                     reply = "請回覆「有」或「沒有」，讓我知道您是否看到下面的按鈕。"
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+                    return
                     
             elif status == "awaiting_tutorial_choice":
                 # 處理教學選擇回應
@@ -1779,14 +1784,17 @@ def handle_message(event):
                     ))
                     user_consent[user_id]["status"] = "tutorial_shown"
                     save_user_data(user_consent)
+                    return
                 elif msg == "我不要教學":
                     skip_message = create_skip_tutorial_message()
                     line_bot_api.reply_message(event.reply_token, skip_message)
                     user_consent[user_id]["status"] = "agreed"
                     save_user_data(user_consent)
+                    return
                 else:
                     reply = "請回覆「我要教學」或「我不要教學」，讓我知道您的選擇。"
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+                    return
                     
             elif status == "tutorial_shown":
                 # 處理教學相關回應
@@ -1804,6 +1812,7 @@ def handle_message(event):
                     ))
                     user_consent[user_id]["status"] = "detailed_tutorial"
                     save_user_data(user_consent)
+                    return
                 else:
                     user_consent[user_id]["status"] = "agreed"
                     save_user_data(user_consent)
@@ -1829,7 +1838,8 @@ def handle_message(event):
                     _, docs = search_related_content(retriever, msg)
                     response = generate_answer(msg, docs)
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
-            
+                return
+                
             elif status == "disagreed":
                 if msg == "重新開始":
                     del user_consent[user_id]
@@ -1842,203 +1852,19 @@ def handle_message(event):
                 else:
                     reply = "由於您尚未同意服務條款，目前無法使用糖小護的功能。\n\n如果您想重新開始，請輸入「重新開始」。"
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-                    
+                return
+                
         elif isinstance(event.message, ImageMessage):
             # 處理圖片訊息
             print("✅ 收到圖片訊息")
-            handle_image_message(event)
-            
-    except Exception as e:
-        print(f"❌ 處理訊息時發生錯誤: {str(e)}")
-        try:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="⚠️ 系統發生錯誤，請稍後再試。")
-            )
-        except Exception as e2:
-            print(f"❌ 發送錯誤訊息時也失敗: {str(e2)}")
-            
-    finally:
-        # 標記消息為已處理
-        global_data_store["processed_messages"].add(message_id)
-        # 清理過多的消息記錄
-        if len(global_data_store["processed_messages"]) > 1000:
-            global_data_store["processed_messages"] = set(list(global_data_store["processed_messages"])[-1000:])
-                
-                # 發送兩條訊息：條款完成 + 按鈕確認
-                line_bot_api.reply_message(event.reply_token, [
-                    FlexSendMessage(
-                        alt_text=welcome_message["altText"],
-                        contents=welcome_message["contents"]
-                    ),
-                    button_check_message
-                ])
-                
-                user_consent[user_id]["status"] = "awaiting_button_response"  # 直接設為等待按鈕回應
-                user_consent[user_id]["agreed_time"] = datetime.now().isoformat()
-                save_user_data(user_consent)
-                return
-            elif msg == "不同意":
-                reply = "感謝您的回覆。如果您改變心意，歡迎隨時重新開始對話。\n\n為了保護您的隱私，我們將不會保存任何資料。"
-                user_consent[user_id]["status"] = "disagreed"
-                user_consent[user_id]["disagreed_time"] = datetime.now().isoformat()
-                save_user_data(user_consent)
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-                return
+            if user_consent[user_id].get("status") == "agreed":
+                handle_image_message(event)
             else:
-                reply = "請點選條款頁面中的「同意並開始使用」或「暫不同意」按鈕，或直接回覆「同意」或「不同意」。"
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-                return
-
-        elif user_consent[user_id].get("status") == "awaiting_button_response":
-            # 處理按鈕確認回應
-            if msg == "有":
-                # 用戶看到按鈕了，詢問是否要教學
-                tutorial_choice_message = create_tutorial_choice_message()
-                line_bot_api.reply_message(event.reply_token, tutorial_choice_message)
-                user_consent[user_id]["status"] = "awaiting_tutorial_choice"
-                save_user_data(user_consent)
-                return
-            elif msg == "沒有":
-                # 用戶沒看到按鈕，提供說明
-                reply = "沒關係！我們來說明一下：\n\n在我的訊息下方，您會看到一些按鈕，這些按鈕可以幫助您快速選擇回應。\n\n如果您現在看到了，請回覆「有」；如果還是沒看到，請回覆「沒有」。"
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-                return
-            else:
-                reply = "請回覆「有」或「沒有」，讓我知道您是否看到下面的按鈕。"
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-                return
-
-        elif user_consent[user_id].get("status") == "awaiting_tutorial_choice":
-            # 處理教學選擇回應
-            if msg == "我要教學":
-                # 發送5頁功能介紹carousel
-                tutorial_carousel = create_tutorial_carousel()
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(
-                    alt_text=tutorial_carousel["altText"],
-                    contents=tutorial_carousel["contents"]
-                ))
-                user_consent[user_id]["status"] = "tutorial_shown"
-                save_user_data(user_consent)
-                return
-            elif msg == "我不要教學":
-                # 發送跳過教學祝福訊息
-                skip_message = create_skip_tutorial_message()
-                line_bot_api.reply_message(event.reply_token, skip_message)
-                user_consent[user_id]["status"] = "agreed"  # 直接進入正常使用狀態
-                save_user_data(user_consent)
-                return
-            else:
-                reply = "請回覆「我要教學」或「我不要教學」，讓我知道您的選擇。"
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-                return
-
-        elif user_consent[user_id].get("status") == "tutorial_shown":
-            # 教學已顯示，處理教學相關回應或進入正常功能
-            if msg in ["問答教學", "語音教學", "血糖教學", "影像教學"]:
-                # 根據不同的教學選擇發送對應的詳細教學Carousel
-                tutorial_carousels = {
-                    "問答教學": create_qa_tutorial_carousel(),
-                    "語音教學": create_voice_tutorial_carousel(),
-                    "血糖教學": create_blood_sugar_tutorial_carousel(),
-                    "影像教學": create_image_tutorial_carousel()
-                }
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="請先同意服務條款才能使用圖片分析功能。")
+                )
                 
-                selected_carousel = tutorial_carousels[msg]
-                
-                # 發送詳細教學Carousel
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(
-                    alt_text=selected_carousel["altText"],
-                    contents=selected_carousel["contents"]
-                ))
-                
-                user_consent[user_id]["status"] = "detailed_tutorial"  # 設為詳細教學狀態
-                save_user_data(user_consent)
-                return
-            else:
-                # 其他訊息，更新狀態並繼續處理正常功能邏輯
-                user_consent[user_id]["status"] = "agreed"
-                save_user_data(user_consent)
-        
-        elif user_consent[user_id].get("status") == "detailed_tutorial":
-            # 用戶看完詳細教學，任何訊息都進入正常使用狀態
-            user_consent[user_id]["status"] = "agreed"
-            save_user_data(user_consent)
-            # 繼續處理正常功能邏輯
-
-        # 處理一般功能
-        if user_consent[user_id].get("status") == "agreed":
-            # 用戶已完成引導，準備接收RAG功能
-            if msg == "教學" or msg == "功能介紹":
-                # 重新顯示功能介紹carousel
-                tutorial_carousel = create_tutorial_carousel()
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(
-                    alt_text=tutorial_carousel["altText"],
-                    contents=tutorial_carousel["contents"]
-                ))
-                user_consent[user_id]["status"] = "tutorial_shown"
-                save_user_data(user_consent)
-            else:
-                # 檢索相關文本並生成回答
-                print(f"💬 處理一般文字訊息: {msg}")
-                _, docs = search_related_content(retriever, msg)
-                response = generate_answer(msg, docs)
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
-            
-            # 標記消息為已處理
-            global_data_store["processed_messages"].add(event.message.id)
-            # 如果已處理消息數量超過1000，清理舊的記錄
-            if len(global_data_store["processed_messages"]) > 1000:
-                global_data_store["processed_messages"] = set(list(global_data_store["processed_messages"])[-1000:])
-            return
-        elif user_consent[user_id].get("status") == "disagreed":
-            reply = "由於您尚未同意服務條款，目前無法使用糖小護的功能。\n\n如果您想重新開始，請輸入「重新開始」。"
-            if msg == "重新開始":
-                del user_consent[user_id]
-                save_user_data(user_consent)
-                flex_message = create_terms_flex_message()
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(
-                    alt_text=flex_message["altText"],
-                    contents=flex_message["contents"]
-                ))
-                return
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-            return
-    
-    elif isinstance(event.message, ImageMessage):
-        # 處理圖片訊息
-        print("✅ 收到圖片訊息")
-        handle_image_message(event)
-    # 檢查消息是否已經處理過
-    if event.message.id in global_data_store["processed_messages"]:
-        print(f"⚠️ 跳過重複消息: {event.message.id}")
-        return
-        
-    try:
-        
-        if isinstance(event.message, TextMessage):
-            # 處理文字訊息
-            print(f"✅ 收到文字訊息：{event.message.text}")
-            message_text = event.message.text.strip()
-            
-            # 檢索相關文本並生成回答
-            print(f"💬 處理一般文字訊息: {message_text}")
-            _, docs = search_related_content(retriever, message_text)
-            response = generate_answer(message_text, docs)
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
-            
-        elif isinstance(event.message, ImageMessage):
-            # 處理圖片訊息
-            print("✅ 收到圖片訊息")
-            handle_image_message(event)
-            
-        # 標記消息為已處理
-        global_data_store["processed_messages"].add(event.message.id)
-        
-        # 如果已處理消息數量超過1000，清理舊的記錄
-        if len(global_data_store["processed_messages"]) > 1000:
-            global_data_store["processed_messages"] = set(list(global_data_store["processed_messages"])[-1000:])
-            
     except LineBotApiError as e:
         print(f"❌ LINE API 錯誤: {str(e)}")
         try:
@@ -2060,19 +1886,28 @@ def handle_message(event):
         except:
             pass
     finally:
+        # 標記消息為已處理
+        global_data_store["processed_messages"].add(event.message.id)
+        
+        # 如果已處理消息數量超過1000，清理舊的記錄
+        if len(global_data_store["processed_messages"]) > 1000:
+            global_data_store["processed_messages"] = set(list(global_data_store["processed_messages"])[-1000:])
+            
         # 釋放消息鎖
         global_data_store["message_lock"] = False
 
 def handle_image_message(event):
     """處理圖片訊息"""
+    temp_dir = "temp_images"
+    image_path = None
+    
     try:
-        # 從 LINE 獲取圖片內容
-        message_content = line_bot_api.get_message_content(event.message.id)
-        
         # 創建臨時文件夾（如果不存在）
-        temp_dir = "temp_images"
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
+            
+        # 從 LINE 獲取圖片內容
+        message_content = line_bot_api.get_message_content(event.message.id)
         
         # 保存圖片到臨時文件
         image_path = os.path.join(temp_dir, f"{event.message.id}.jpg")
@@ -2080,24 +1915,15 @@ def handle_image_message(event):
             for chunk in message_content.iter_content():
                 f.write(chunk)
         
-        try:
-            # 分析圖片並獲取 Flex Message
-            flex_message = analyze_food_image(image_path)
-            
-            # 回覆 Flex Message
-            line_bot_api.reply_message(
-                event.reply_token,
-                flex_message
-            )
-            
-        finally:
-            # 確保無論如何都會刪除臨時文件
-            try:
-                if os.path.exists(image_path):
-                    os.remove(image_path)
-            except Exception as e:
-                print(f"⚠️ 無法刪除臨時文件: {str(e)}")
-    
+        # 分析圖片並獲取 Flex Message
+        flex_message = analyze_food_image(image_path)
+        
+        # 回覆 Flex Message
+        line_bot_api.reply_message(
+            event.reply_token,
+            flex_message
+        )
+        
     except LineBotApiError as e:
         print(f"❌ LINE API 錯誤: {str(e)}")
         line_bot_api.reply_message(
@@ -2110,6 +1936,13 @@ def handle_image_message(event):
             event.reply_token,
             TextSendMessage(text="⚠️ 系統錯誤，請稍後再試。")
         )
+    finally:
+        # 清理臨時文件
+        if image_path and os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+            except Exception as e:
+                print(f"⚠️ 無法刪除臨時文件: {str(e)}")
 
 if __name__ == "__main__":
     print("啟動糖尿病諮詢 LINE Bot")
