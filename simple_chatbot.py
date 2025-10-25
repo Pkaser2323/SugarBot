@@ -63,60 +63,91 @@ is_model_ready = False
 model_init_error = None
 
 def initialize_sas_model():
-    """初始化 SAS 模型（非阻塞）"""
+    """初始化 SAS 模型"""
     global sas_model, SAS_PARAMS, is_model_ready, model_init_error
     
-    try:
-        print("⏳ 正在從 Hugging Face 加載 SAS 模型...")
-        sas_model = CrossEncoder("Pkaser2323/SAS_Model", device="cpu")
-        print("✅ 從 Hugging Face 加載 SAS 模型成功！")
-        
-        # 嘗試從 Hugging Face 加載參數
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
         try:
-            from huggingface_hub import hf_hub_download
-            params_path = hf_hub_download(
-                repo_id="Pkaser2323/SAS_Model",
-                filename="best_params.json"
-            )
-            with open(params_path, "r", encoding="utf-8") as f:
-                SAS_PARAMS = json.load(f)
-            print("✅ 從 Hugging Face 加載參數成功！")
-        except Exception as e:
-            print(f"⚠️ 無法從 Hugging Face 加載參數: {str(e)}")
-            print("⏳ 嘗試從本地加載參數...")
-            try:
-                with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
-                    SAS_PARAMS = json.load(f)
-                    print("✅ 從本地加載參數成功！")
-            except Exception as e2:
-                print(f"⚠️ 無法從本地加載參數: {str(e2)}")
-                # 使用預設參數
-                print("✅ 使用預設參數")
-
-    except Exception as e:
-        print(f"⚠️ 無法從 Hugging Face 加載模型: {str(e)}")
-        print("⏳ 嘗試從本地加載模型...")
-        try:
-            sas_model = CrossEncoder(SAS_MODEL_DIR)
-            sas_model.model = sas_model.model.to("cpu")
-            print("✅ 從本地加載模型成功！")
+            print(f"⏳ 正在從 Hugging Face 加載 SAS 模型（嘗試 {retry_count + 1}/{max_retries}）...")
             
-            # 嘗試從本地加載參數
+            # 設置 token（如果有的話）
+            hf_token = os.environ.get("HUGGINGFACE_TOKEN")
+            if hf_token:
+                print("✓ 使用 HuggingFace Token")
+                from huggingface_hub import login
+                login(hf_token)
+            
+            # 加載模型
+            sas_model = CrossEncoder(
+                "Pkaser2323/SAS_Model",
+                device="cpu",
+                use_auth_token=hf_token if hf_token else None
+            )
+            print("✅ 從 Hugging Face 加載 SAS 模型成功！")
+            
+            # 嘗試從 Hugging Face 加載參數
             try:
-                with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
+                from huggingface_hub import hf_hub_download
+                params_path = hf_hub_download(
+                    repo_id="Pkaser2323/SAS_Model",
+                    filename="best_params.json",
+                    use_auth_token=hf_token if hf_token else None
+                )
+                with open(params_path, "r", encoding="utf-8") as f:
                     SAS_PARAMS = json.load(f)
-                print("✅ 從本地加載參數成功！")
-            except Exception as e2:
-                print(f"⚠️ 無法從本地加載參數: {str(e2)}")
-                # 使用預設參數
-                print("✅ 使用預設參數")
-        except Exception as e2:
-            print(f"❌ 本地模型加載也失敗: {str(e2)}")
-            print("⚠️ 將以降級模式運行（不使用 SAS 模型）")
-            model_init_error = str(e2)
-            return
+                print("✅ 從 Hugging Face 加載參數成功！")
+                is_model_ready = True
+                return
+            except Exception as e:
+                print(f"⚠️ 無法從 Hugging Face 加載參數: {str(e)}")
+                print("⏳ 嘗試從本地加載參數...")
+                try:
+                    with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
+                        SAS_PARAMS = json.load(f)
+                    print("✅ 從本地加載參數成功！")
+                    is_model_ready = True
+                    return
+                except Exception as e2:
+                    print(f"⚠️ 無法從本地加載參數: {str(e2)}")
+                    print("✅ 使用預設參數")
+                    is_model_ready = True
+                    return
 
-    is_model_ready = True
+        except Exception as e:
+            retry_count += 1
+            print(f"⚠️ 無法從 Hugging Face 加載模型（嘗試 {retry_count}/{max_retries}）: {str(e)}")
+            
+            if retry_count == max_retries:
+                print("⏳ 嘗試從本地加載模型...")
+                try:
+                    sas_model = CrossEncoder(SAS_MODEL_DIR)
+                    sas_model.model = sas_model.model.to("cpu")
+                    print("✅ 從本地加載模型成功！")
+                    
+                    # 嘗試從本地加載參數
+                    try:
+                        with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
+                            SAS_PARAMS = json.load(f)
+                        print("✅ 從本地加載參數成功！")
+                        is_model_ready = True
+                        return
+                    except Exception as e2:
+                        print(f"⚠️ 無法從本地加載參數: {str(e2)}")
+                        print("✅ 使用預設參數")
+                        is_model_ready = True
+                        return
+                except Exception as e2:
+                    print(f"❌ 本地模型加載也失敗: {str(e2)}")
+                    print("⚠️ 將以降級模式運行（不使用 SAS 模型）")
+                    model_init_error = str(e2)
+                    return
+            
+            # 等待一下再重試
+            import time
+            time.sleep(2)
 
 
 def predict_pos_prob(
@@ -126,24 +157,18 @@ def predict_pos_prob(
     temperature: float = 2.0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """預測正類機率"""
-    global sas_model, is_model_ready
-    
     # 空輸入檢查
     if not questions or not answers or len(questions) != len(answers):
         return np.array([]), np.array([])
     
-    # 延遲載入：首次使用時才初始化 SAS 模型
-    if not is_model_ready and not model_init_error:
-        print("⏳ 首次評分，正在初始化 SAS 模型...")
-        try:
-            initialize_sas_model()
-        except Exception as e:
-            print(f"❌ SAS 模型初始化失敗: {str(e)}")
-            return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
-    
     # 模型就緒檢查
-    if not is_model_ready or model is None:
-        print("⚠️ SAS 模型未就緒，返回預設分數")
+    if not is_model_ready:
+        print("⚠️ SAS 模型尚未就緒，返回預設分數")
+        return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
+    
+    # 模型存在檢查
+    if model is None:
+        print("⚠️ SAS 模型未加載，返回預設分數")
         return np.ones(len(questions)) * 0.7, np.ones(len(questions)) * 0.7
     
     # 過濾無效輸入
@@ -262,81 +287,70 @@ def generate_subqueries(question: str, k: int = 2) -> List[str]:
     return [question]
 
 def initialize_vector_db():
-    """檢查向量資料庫文件是否存在，如果不存在則從 CSV 創建"""
+    """初始化向量資料庫，如果不存在則從 CSV 創建"""
     import pandas as pd
     
-    # 1. 設置所有路徑（一次設定，不再更改）
+    # 設置路徑（在 Render 上使用 /tmp 目錄）
     base_dir = os.path.dirname(__file__)
-    db_dir = "/tmp/vector_DB" if os.environ.get("RENDER") else os.path.join(base_dir, "vector_DB")
-    db_path = os.path.join(db_dir, "diabetes_comprehensive_db")
-    csv_path = os.path.join(base_dir, "datacsv", "a_topic_analyzed_processed.csv")
+    if os.environ.get("RENDER"):
+        db_dir = "/tmp/vector_DB"
+    else:
+        db_dir = os.path.join(base_dir, "vector_DB")
+        csv_path = os.path.join(base_dir, "datacsv", "a_topic_analyzed_processed.csv")
     
     print(f"向量資料庫路徑: {db_path}")
     print(f"CSV 文件路徑: {csv_path}")
     
-    try:
-        # 2. 確保目錄存在
-        os.makedirs(db_dir, exist_ok=True)
-        
-        # 3. 檢查向量資料庫文件是否存在且完整
-        if os.path.exists(db_path) and os.path.exists(os.path.join(db_path, "index.faiss")):
-            print("✅ 向量資料庫文件已存在")
-            return db_path
-        
-        # 4. 從 CSV 創建新的向量資料庫
-        print("⚙️ 開始創建新的向量資料庫...")
-        
-        # 檢查並讀取 CSV
-        if not os.path.exists(csv_path):
-            raise FileNotFoundError(f"找不到資料文件：{csv_path}")
-            
-        # 讀取 CSV
-        df = pd.read_csv(csv_path, encoding="utf-8-sig")
-        
-        # 檢查必要欄位
-        required_cols = ["對應子問題", "回答"]
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            raise ValueError(f"CSV 缺少必要欄位: {', '.join(missing_cols)}")
-        
-        # 過濾無效行
-        df = df.dropna(subset=["對應子問題", "回答"])
-        if df.empty:
-            raise ValueError("CSV 文件中沒有有效的問答對")
-        
-        # 準備文本
-        texts = []
-        for _, row in df.iterrows():
-            text = f"問題：{row['對應子問題']}\n答案：{row['回答']}"
-            texts.append(text)
-        
-        print(f"✓ 載入了 {len(texts)} 筆問答對")
-        
-        # 創建嵌入
-        model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
-        embeddings = HuggingFaceEmbeddings(
-            model_name=EMBED_MODEL_NAME,
-            model_kwargs=model_kwargs
-        )
-        
-        # 創建向量資料庫
-        db = FAISS.from_texts(texts, embeddings)
-        
-        # 保存資料庫
-        db.save_local(db_path)
-        
-        # 驗證保存是否成功
-        if not os.path.exists(os.path.join(db_path, "index.faiss")):
-            raise FileNotFoundError("向量資料庫保存失敗或保存的文件是空的")
-            
-        print(f"✅ 向量資料庫成功創建並保存至：{db_path}")
+    # 確保目錄存在
+    os.makedirs(db_dir, exist_ok=True)
+    
+    # 檢查向量資料庫是否已存在
+    if os.path.exists(db_path):
+        print("✓ 向量資料庫已存在")
         return db_path
         
-    except Exception as e:
-        print(f"❌ 初始化向量資料庫時發生錯誤: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise  # 向上傳遞錯誤，讓應用程式知道初始化失敗
+    print("⚙️ 向量資料庫不存在，開始創建...")
+    
+    # 檢查 CSV 文件
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"找不到資料文件：{csv_path}")
+    
+    # 讀取 CSV
+    df = pd.read_csv(csv_path, encoding="utf-8-sig")
+    
+    # 檢查必要欄位
+    required_cols = ["對應子問題", "回答"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"CSV 缺少必要欄位: {', '.join(missing_cols)}")
+    
+    # 過濾無效行
+    df = df.dropna(subset=["對應子問題", "回答"])
+    
+    # 準備文本
+    texts = []
+    for _, row in df.iterrows():
+        # 組合問題和答案
+        text = f"問題：{row['對應子問題']}\n答案：{row['回答']}"
+        texts.append(text)
+    
+    print(f"✓ 載入了 {len(texts)} 筆問答對")
+    
+    # 創建嵌入
+    model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBED_MODEL_NAME,
+        model_kwargs=model_kwargs
+    )
+    
+    # 創建向量資料庫
+    db = FAISS.from_texts(texts, embeddings)
+    
+    # 保存資料庫
+    db.save_local(db_path)
+    print(f"✓ 向量資料庫已保存至：{db_path}")
+    
+    return db_path
 
 def generate_retriever():
     """生成檢索器"""
@@ -368,34 +382,12 @@ def search_related_content(query):
         Tuple[str, List]: (合併後的文本, 文檔列表)
     """
     global vector_db
-    
-    try:
-        # 延遲載入：首次使用時才初始化向量資料庫
-        if not vector_db:
-            print("⏳ 首次查詢，正在初始化向量資料庫...")
-            db_path = initialize_vector_db()  # 只檢查文件或創建文件
-            
-            # 創建嵌入模型
-            model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
-            embeddings = HuggingFaceEmbeddings(
-                model_name=EMBED_MODEL_NAME,
-                model_kwargs=model_kwargs
-            )
-            
-            # 載入向量資料庫並轉換為 retriever
-            db = FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
-            vector_db = db.as_retriever(search_kwargs={"k": 5})
-            print("✅ 向量資料庫初始化完成")
-        
-        # 執行檢索
-        docs = vector_db.invoke(query)
-        return "\n---\n".join([doc.page_content for doc in docs]), docs
-        
-    except Exception as e:
-        print(f"❌ 檢索過程發生錯誤: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    if not vector_db:
+        print("⚠️ 向量資料庫尚未初始化")
         return "", []
+        
+    docs = vector_db.invoke(query)
+    return "\n---\n".join([doc.page_content for doc in docs]), docs
 
 def generate_answer(query: str, docs=None):
     """生成回答，使用 Fast/Slow path 機制"""
@@ -480,50 +472,45 @@ def generate_answer(query: str, docs=None):
         all_evidence = []
         low_thr = SAS_PARAMS.get("low_threshold", 0.3)
         
-        try:
-            # 檢查向量資料庫是否初始化
-            if not vector_db:
-                print("⚠️ 向量資料庫尚未初始化")
-                return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
-
-            # 為每個子問題檢索並評估
-            for sq in subqs:
-                try:
-                    print(f"檢索子問題: {sq}")
-                    # 檢索相關文本
-                    sq_docs = vector_db.invoke(sq)
-                    if not sq_docs:
-                        print("未找到相關文本")
-                        continue
-                    
-                    print(f"找到 {len(sq_docs)} 個相關文本")
-                    
-                    # 評估每個檢索結果
-                    _, probs = predict_pos_prob(
-                        sas_model,
-                        [sq] * len(sq_docs),
-                        [doc.page_content for doc in sq_docs],
-                        temperature=SAS_PARAMS.get("temperature", 2.0)
-                    )
-                    
-                    # 收集通過低門檻的段落
-                    passed_indices = np.nonzero(probs >= low_thr)[0]
-                    if len(passed_indices) > 0:
-                        # 選擇最多2個最高分的段落
-                        top_indices = passed_indices[np.argsort(-probs[passed_indices])[:2]]
-                        selected_docs = [sq_docs[i].page_content for i in top_indices]
-                        all_evidence.extend(selected_docs)
-                        print(f"添加 {len(selected_docs)} 個高分段落")
-                    else:
-                        print("沒有段落通過低門檻")
-                        
-                except Exception as e:
-                    print(f"⚠️ 處理子問題時發生錯誤: {str(e)}")
-                    continue  # 繼續處理下一個子問題
-                    
-        except Exception as e:
-            print(f"❌ 檢索過程發生錯誤: {str(e)}")
+        # 檢查向量資料庫是否初始化
+        if not vector_db:
+            print("⚠️ 向量資料庫尚未初始化")
             return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
+
+        # 為每個子問題檢索並評估
+        for sq in subqs:
+            try:
+                print(f"檢索子問題: {sq}")
+            # 檢索相關文本
+                sq_docs = vector_db.invoke(sq)
+                if not sq_docs:
+                    print("未找到相關文本")
+                    continue
+                
+                print(f"找到 {len(sq_docs)} 個相關文本")
+                
+            # 評估每個檢索結果
+                _, probs = predict_pos_prob(
+                sas_model,
+                [sq] * len(sq_docs),
+                [doc.page_content for doc in sq_docs],
+                temperature=SAS_PARAMS.get("temperature", 2.0)
+            )
+            
+            # 收集通過低門檻的段落
+                passed_indices = np.nonzero(probs >= low_thr)[0]
+                if len(passed_indices) > 0:
+                # 選擇最多2個最高分的段落
+                    top_indices = passed_indices[np.argsort(-probs[passed_indices])[:2]]
+                    selected_docs = [sq_docs[i].page_content for i in top_indices]
+                    all_evidence.extend(selected_docs)
+                    print(f"添加 {len(selected_docs)} 個高分段落")
+                else:
+                    print("沒有段落通過低門檻")
+                    
+            except Exception as e:
+                print(f"⚠️ 處理子問題時發生錯誤: {str(e)}")
+                continue  # 繼續處理下一個子問題
         
         # 如果沒有找到任何有效證據
         if not all_evidence:
@@ -576,7 +563,12 @@ def generate_answer(query: str, docs=None):
 if os.environ.get("RENDER"):
     os.environ["TRANSFORMERS_CACHE"] = "/tmp/huggingface"
     os.environ["HF_HOME"] = "/tmp/huggingface"
+    os.environ["HF_DATASETS_CACHE"] = "/tmp/huggingface/datasets"
     print(f"HuggingFace 快取目錄設為: {os.environ['TRANSFORMERS_CACHE']}")
+    # 確保快取目錄存在且可寫
+    for cache_dir in ["/tmp/huggingface", "/tmp/huggingface/datasets"]:
+        os.makedirs(cache_dir, exist_ok=True)
+        os.chmod(cache_dir, 0o777)  # 確保目錄可寫
 
 # 全局變數初始化
 app = Flask(__name__)
@@ -588,14 +580,14 @@ initialized = False
 
 def initialize_app():
     """初始化應用程式（只在第一次啟動時執行）"""
-    global line_bot_api, handler, initialized
+    global line_bot_api, handler, vector_db, initialized, sas_model, is_model_ready
     
     if initialized:
         return
     
     try:
         print("⚙️ 開始初始化應用程式...")
-        
+
         # LINE Bot setup
         print("⏳ 初始化 LINE Bot API...")
         global line_bot_api
@@ -604,18 +596,22 @@ def initialize_app():
         handler = WebhookHandler(LINE_SECRET)
         print("✅ LINE Bot API 初始化成功")
         
-        # 檢查必要文件是否存在
-        print("⏳ 檢查必要文件...")
-        db_dir = "/tmp/vector_DB" if os.environ.get("RENDER") else os.path.join(os.path.dirname(__file__), "vector_DB")
-        db_path = os.path.join(db_dir, "diabetes_comprehensive_db")
-        if not os.path.exists(db_path) or not os.path.exists(os.path.join(db_path, "index.faiss")):
-            print("⚠️ 向量資料庫文件不存在，將在首次查詢時創建")
+        # 初始化 SAS 模型
+        print("⏳ 初始化 SAS 模型...")
+        initialize_sas_model()
+        if not is_model_ready:
+            print("⚠️ SAS 模型初始化失敗，將使用降級模式運行")
         else:
-            print("✅ 向量資料庫文件檢查完成")
+            print("✅ SAS 模型初始化成功")
+        
+        # 初始化向量資料庫
+        print("⏳ 初始化向量資料庫...")
+        vector_db = generate_retriever()
+        print("✅ 向量資料庫初始化成功")
         
         # 標記初始化完成
         initialized = True
-        print("✅ 基礎應用程式初始化完成")
+        print("✅ 應用程式初始化完成")
         
     except Exception as e:
         print(f"❌ 應用程式初始化失敗: {str(e)}")
@@ -625,25 +621,6 @@ def initialize_app():
 
 # 在應用程式啟動時初始化
 initialize_app()
-
-# 在另一個線程中預載 SAS 模型
-import threading
-def preload_sas_model():
-    """在背景線程中預載 SAS 模型"""
-    try:
-        print("⏳ 在背景預載 SAS 模型...")
-        import requests
-        response = requests.get("http://localhost:5000/init")
-        if response.status_code == 200:
-            print("✅ SAS 模型預載請求已發送")
-        else:
-            print(f"⚠️ SAS 模型預載請求失敗: {response.status_code}")
-    except Exception as e:
-        print(f"⚠️ 無法預載 SAS 模型: {str(e)}")
-
-# 啟動背景預載
-if not os.environ.get("RENDER"):  # 本地開發環境
-    threading.Thread(target=preload_sas_model, daemon=True).start()
 
 # 根路徑
 @app.route("/", methods=["GET"])
@@ -656,14 +633,7 @@ def root():
             return "糖尿病諮詢 LINE Bot 服務初始化完成", 200
         except:
             return "糖尿病諮詢 LINE Bot 服務初始化失敗", 500
-    
-    # 在回應中包含模型狀態
-    status = {
-        "service": "running",
-        "sas_model": "ready" if is_model_ready else "not_ready",
-        "error": model_init_error if model_init_error else None
-    }
-    return json.dumps(status, ensure_ascii=False), 200
+    return "糖尿病諮詢 LINE Bot 服務正在運行中", 200
 
 # 健康檢查路由
 @app.route("/health", methods=["GET"])
@@ -679,22 +649,9 @@ def health_check():
 # 初始化路由
 @app.route("/init", methods=["GET"])
 def init_models():
-    """初始化 SAS 模型（在應用程式啟動後立即調用）"""
-    global is_model_ready, model_init_error
-    
-    try:
-        if not is_model_ready and not model_init_error:
-            print("⏳ 預先初始化 SAS 模型...")
-            initialize_sas_model()
-            if is_model_ready:
-                print("✅ SAS 模型初始化成功，已準備好進行評分")
-            else:
-                print("⚠️ SAS 模型初始化未完成")
-    except Exception as e:
-        print(f"❌ SAS 模型初始化失敗: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    
+    """初始化模型（非阻塞）"""
+    if not is_model_ready and not model_init_error:
+        initialize_sas_model()
     return json.dumps({
         "status": "success" if is_model_ready else "initializing",
         "model_ready": is_model_ready,
@@ -2149,38 +2106,23 @@ def handle_message(event):
                 user_consent[user_id]["status"] = "agreed"
                 save_user_data(user_consent)
                 
-            # 處理教學相關指令（全域可觸發，只要已同意就可以使用）
-            if status in ["agreed", "tutorial_shown", "detailed_tutorial"]:
-                # 教學相關指令
+            # 處理一般功能（已同意用戶）
+            if status == "agreed":
                 if msg == "教學" or msg == "功能介紹":
                     tutorial_carousel = create_tutorial_carousel()
                     line_bot_api.reply_message(event.reply_token, FlexSendMessage(
                         alt_text=tutorial_carousel["altText"],
                         contents=tutorial_carousel["contents"]
                     ))
+                    user_consent[user_id]["status"] = "tutorial_shown"
+                    save_user_data(user_consent)
+                else:
+                    # 使用 RAG 生成回答
+                    print(f"💬 處理一般文字訊息: {msg}")
+                    _, docs = search_related_content(msg)
+                    response = generate_answer(msg, docs)
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
                     return
-                elif msg in ["問答教學", "語音教學", "血糖教學", "影像教學"]:
-                    tutorial_carousels = {
-                        "問答教學": create_qa_tutorial_carousel(),
-                        "語音教學": create_voice_tutorial_carousel(),
-                        "血糖教學": create_blood_sugar_tutorial_carousel(),
-                        "影像教學": create_image_tutorial_carousel()
-                    }
-                    selected_carousel = tutorial_carousels[msg]
-                    line_bot_api.reply_message(event.reply_token, FlexSendMessage(
-                        alt_text=selected_carousel["altText"],
-                        contents=selected_carousel["contents"]
-                    ))
-                    return
-                
-            # 處理一般功能（已同意用戶）
-            if status == "agreed":
-                # 使用 RAG 生成回答
-                print(f"💬 處理一般文字訊息: {msg}")
-                _, docs = search_related_content(msg)
-                response = generate_answer(msg, docs)
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
-                return
                 
             elif status == "disagreed":
                 if msg == "重新開始":
