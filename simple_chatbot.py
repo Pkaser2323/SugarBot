@@ -87,7 +87,7 @@ def initialize_sas_model():
             try:
                 with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
                     SAS_PARAMS = json.load(f)
-                print("✅ 從本地加載參數成功！")
+                    print("✅ 從本地加載參數成功！")
             except Exception as e2:
                 print(f"⚠️ 無法從本地加載參數: {str(e2)}")
                 # 使用預設參數
@@ -265,8 +265,8 @@ def initialize_vector_db():
         db_dir = "/tmp/vector_DB"
     else:
         db_dir = os.path.join(base_dir, "vector_DB")
-    db_path = os.path.join(db_dir, "diabetes_comprehensive_db")
-    csv_path = os.path.join(base_dir, "datacsv", "a_topic_analyzed_processed.csv")
+        db_path = os.path.join(db_dir, "diabetes_comprehensive_db")
+        csv_path = os.path.join(base_dir, "datacsv", "a_topic_analyzed_processed.csv")
     
     print(f"向量資料庫路徑: {db_path}")
     print(f"CSV 文件路徑: {csv_path}")
@@ -442,45 +442,50 @@ def generate_answer(query: str, docs=None):
         all_evidence = []
         low_thr = SAS_PARAMS.get("low_threshold", 0.3)
         
-        # 檢查向量資料庫是否初始化
-        if not vector_db:
-            print("⚠️ 向量資料庫尚未初始化")
-            return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
+        try:
+            # 檢查向量資料庫是否初始化
+            if not vector_db:
+                print("⚠️ 向量資料庫尚未初始化")
+                return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
 
-        # 為每個子問題檢索並評估
-        for sq in subqs:
-            try:
-                print(f"檢索子問題: {sq}")
-                # 檢索相關文本
-                sq_docs = vector_db.invoke(sq)
-                if not sq_docs:
-                    print("未找到相關文本")
-                    continue
-                
-                print(f"找到 {len(sq_docs)} 個相關文本")
-                
-                # 評估每個檢索結果
-                _, probs = predict_pos_prob(
-                    sas_model,
-                    [sq] * len(sq_docs),
-                    [doc.page_content for doc in sq_docs],
-                    temperature=SAS_PARAMS.get("temperature", 2.0)
-                )
-                
-                # 收集通過低門檻的段落
-                passed_indices = np.nonzero(probs >= low_thr)[0]
-                if len(passed_indices) > 0:
-                    # 選擇最多2個最高分的段落
-                    top_indices = passed_indices[np.argsort(-probs[passed_indices])[:2]]
-                    selected_docs = [sq_docs[i].page_content for i in top_indices]
-                    all_evidence.extend(selected_docs)
-                    print(f"添加 {len(selected_docs)} 個高分段落")
-                else:
-                    print("沒有段落通過低門檻")
+            # 為每個子問題檢索並評估
+            for sq in subqs:
+                try:
+                    print(f"檢索子問題: {sq}")
+                    # 檢索相關文本
+                    sq_docs = vector_db.invoke(sq)
+                    if not sq_docs:
+                        print("未找到相關文本")
+                        continue
                     
-            except Exception as e:
-                print(f"⚠️ 處理子問題時發生錯誤: {str(e)}")
-                continue  # 繼續處理下一個子問題
+                    print(f"找到 {len(sq_docs)} 個相關文本")
+                    
+                    # 評估每個檢索結果
+                    _, probs = predict_pos_prob(
+                        sas_model,
+                        [sq] * len(sq_docs),
+                        [doc.page_content for doc in sq_docs],
+                        temperature=SAS_PARAMS.get("temperature", 2.0)
+                    )
+                    
+                    # 收集通過低門檻的段落
+                    passed_indices = np.nonzero(probs >= low_thr)[0]
+                    if len(passed_indices) > 0:
+                        # 選擇最多2個最高分的段落
+                        top_indices = passed_indices[np.argsort(-probs[passed_indices])[:2]]
+                        selected_docs = [sq_docs[i].page_content for i in top_indices]
+                        all_evidence.extend(selected_docs)
+                        print(f"添加 {len(selected_docs)} 個高分段落")
+                    else:
+                        print("沒有段落通過低門檻")
+                        
+                except Exception as e:
+                    print(f"⚠️ 處理子問題時發生錯誤: {str(e)}")
+                    continue  # 繼續處理下一個子問題
+                    
+        except Exception as e:
+            print(f"❌ 檢索過程發生錯誤: {str(e)}")
+            return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
         
         # 如果沒有找到任何有效證據
         if not all_evidence:
@@ -529,6 +534,12 @@ def generate_answer(query: str, docs=None):
         print(f"❌ 生成回答時發生錯誤: {str(e)}")
         return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
 
+# 設置 HuggingFace 快取目錄（在 Render 上使用 /tmp）
+if os.environ.get("RENDER"):
+    os.environ["TRANSFORMERS_CACHE"] = "/tmp/huggingface"
+    os.environ["HF_HOME"] = "/tmp/huggingface"
+    print(f"HuggingFace 快取目錄設為: {os.environ['TRANSFORMERS_CACHE']}")
+
 # 全局變數初始化
 app = Flask(__name__)
 port = 5000
@@ -539,15 +550,15 @@ initialized = False
 
 def initialize_app():
     """初始化應用程式（只在第一次啟動時執行）"""
-    global line_bot_api, handler, vector_db, initialized
+    global line_bot_api, handler, vector_db, initialized, sas_model, is_model_ready
     
     if initialized:
         return
     
     try:
         print("⚙️ 開始初始化應用程式...")
-
-# LINE Bot setup
+        
+        # LINE Bot setup
         print("⏳ 初始化 LINE Bot API...")
         global line_bot_api
         line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
@@ -559,6 +570,13 @@ def initialize_app():
         print("⏳ 初始化向量資料庫...")
         vector_db = generate_retriever()
         print("✅ 向量資料庫初始化成功")
+        
+        # 初始化 SAS 模型
+        print("⏳ 初始化 SAS 模型...")
+        initialize_sas_model()
+        if not is_model_ready:
+            print("⚠️ SAS 模型初始化失敗，將使用降級模式運行")
+        print("✅ SAS 模型初始化完成")
         
         # 標記初始化完成
         initialized = True
@@ -826,8 +844,8 @@ def load_user_data():
             return {}
             
         # 讀取文件
-        with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
             
         # 驗證數據格式
         if not isinstance(data, dict):
@@ -875,7 +893,7 @@ def load_user_data():
         print(f"❌ 載入用戶數據失敗: {e}")
         import traceback
         traceback.print_exc()
-        return {}
+    return {}
 
 def calculate_data_hash(data):
     """計算數據的雜湊值（用於檢測變更）"""
@@ -2017,8 +2035,7 @@ def handle_message(event):
                         alt_text=tutorial_carousel["altText"],
                         contents=tutorial_carousel["contents"]
                     ))
-                    user_consent[user_id]["status"] = "tutorial_shown"
-                    save_user_data(user_consent)
+                    # 不改變用戶狀態，保持在當前狀態
                     return
                 elif msg == "我不要教學":
                     skip_message = create_skip_tutorial_message()
@@ -2057,23 +2074,38 @@ def handle_message(event):
                 user_consent[user_id]["status"] = "agreed"
                 save_user_data(user_consent)
                 
-            # 處理一般功能（已同意用戶）
-            if status == "agreed":
+            # 處理教學相關指令（全域可觸發，只要已同意就可以使用）
+            if status in ["agreed", "tutorial_shown", "detailed_tutorial"]:
+                # 教學相關指令
                 if msg == "教學" or msg == "功能介紹":
                     tutorial_carousel = create_tutorial_carousel()
                     line_bot_api.reply_message(event.reply_token, FlexSendMessage(
                         alt_text=tutorial_carousel["altText"],
                         contents=tutorial_carousel["contents"]
                     ))
-                    user_consent[user_id]["status"] = "tutorial_shown"
-                    save_user_data(user_consent)
-                else:
-                    # 使用 RAG 生成回答
-                    print(f"💬 處理一般文字訊息: {msg}")
-                    _, docs = search_related_content(msg)
-                    response = generate_answer(msg, docs)
-                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
                     return
+                elif msg in ["問答教學", "語音教學", "血糖教學", "影像教學"]:
+                    tutorial_carousels = {
+                        "問答教學": create_qa_tutorial_carousel(),
+                        "語音教學": create_voice_tutorial_carousel(),
+                        "血糖教學": create_blood_sugar_tutorial_carousel(),
+                        "影像教學": create_image_tutorial_carousel()
+                    }
+                    selected_carousel = tutorial_carousels[msg]
+                    line_bot_api.reply_message(event.reply_token, FlexSendMessage(
+                        alt_text=selected_carousel["altText"],
+                        contents=selected_carousel["contents"]
+                    ))
+                    return
+                
+            # 處理一般功能（已同意用戶）
+            if status == "agreed":
+                # 使用 RAG 生成回答
+                print(f"💬 處理一般文字訊息: {msg}")
+                _, docs = search_related_content(msg)
+                response = generate_answer(msg, docs)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
+                return
                 
             elif status == "disagreed":
                 if msg == "重新開始":
