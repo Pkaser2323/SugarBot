@@ -256,7 +256,7 @@ def generate_subqueries(question: str, k: int = 2) -> List[str]:
     return [question]
 
 def initialize_vector_db():
-    """初始化向量資料庫，如果不存在則從 CSV 創建"""
+    """檢查向量資料庫文件是否存在，如果不存在則從 CSV 創建"""
     import pandas as pd
     
     # 1. 設置所有路徑（一次設定，不再更改）
@@ -272,28 +272,10 @@ def initialize_vector_db():
         # 2. 確保目錄存在
         os.makedirs(db_dir, exist_ok=True)
         
-        # 3. 檢查並載入現有向量資料庫
-        if os.path.exists(db_path):
-            print("檢查現有向量資料庫...")
-            try:
-                # 創建嵌入模型
-                model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
-                embeddings = HuggingFaceEmbeddings(
-                    model_name=EMBED_MODEL_NAME,
-                    model_kwargs=model_kwargs
-                )
-                
-                # 嘗試載入資料庫
-                db = FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
-                # 簡單驗證：確保資料庫不是空的
-                if db and len(db.docstore._dict) > 0:
-                    print("✅ 成功載入現有向量資料庫")
-                    return db_path
-                else:
-                    print("⚠️ 向量資料庫存在但可能損壞或為空")
-            except Exception as e:
-                print(f"⚠️ 載入現有向量資料庫失敗: {e}")
-                # 如果載入失敗，繼續創建新的資料庫
+        # 3. 檢查向量資料庫文件是否存在且完整
+        if os.path.exists(db_path) and os.path.exists(os.path.join(db_path, "index.faiss")):
+            print("✅ 向量資料庫文件已存在")
+            return db_path
         
         # 4. 從 CSV 創建新的向量資料庫
         print("⚙️ 開始創建新的向量資料庫...")
@@ -333,14 +315,12 @@ def initialize_vector_db():
         
         # 創建向量資料庫
         db = FAISS.from_texts(texts, embeddings)
-        if not db or len(db.docstore._dict) == 0:
-            raise ValueError("創建的向量資料庫是空的")
         
         # 保存資料庫
         db.save_local(db_path)
         
         # 驗證保存是否成功
-        if not os.path.exists(db_path) or not os.listdir(db_path):
+        if not os.path.exists(os.path.join(db_path, "index.faiss")):
             raise FileNotFoundError("向量資料庫保存失敗或保存的文件是空的")
             
         print(f"✅ 向量資料庫成功創建並保存至：{db_path}")
