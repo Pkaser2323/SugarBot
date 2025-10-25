@@ -2065,7 +2065,8 @@ def handle_message(event):
                         alt_text=tutorial_carousel["altText"],
                         contents=tutorial_carousel["contents"]
                     ))
-                    # 不改變用戶狀態，保持在當前狀態
+                    user_consent[user_id]["status"] = "tutorial_shown"
+                    save_user_data(user_consent)
                     return
                 elif msg == "我不要教學":
                     skip_message = create_skip_tutorial_message()
