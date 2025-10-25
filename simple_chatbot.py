@@ -382,8 +382,9 @@ def search_related_content(query):
                 model_kwargs=model_kwargs
             )
             
-            # 載入向量資料庫
-            vector_db = FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
+            # 載入向量資料庫並轉換為 retriever
+            db = FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
+            vector_db = db.as_retriever(search_kwargs={"k": 5})
             print("✅ 向量資料庫初始化完成")
         
         # 執行檢索
