@@ -85,8 +85,8 @@ def initialize_sas_model():
             print(f"⚠️ 無法從 Hugging Face 加載參數: {str(e)}")
             print("⏳ 嘗試從本地加載參數...")
             try:
-                with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
-                    SAS_PARAMS = json.load(f)
+with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
+    SAS_PARAMS = json.load(f)
                 print("✅ 從本地加載參數成功！")
             except Exception as e2:
                 print(f"⚠️ 無法從本地加載參數: {str(e2)}")
@@ -97,7 +97,7 @@ def initialize_sas_model():
         print(f"⚠️ 無法從 Hugging Face 加載模型: {str(e)}")
         print("⏳ 嘗試從本地加載模型...")
         try:
-            sas_model = CrossEncoder(SAS_MODEL_DIR)
+sas_model = CrossEncoder(SAS_MODEL_DIR)
             sas_model.model = sas_model.model.to("cpu")
             print("✅ 從本地加載模型成功！")
             
@@ -565,8 +565,8 @@ def callback():
         print(f"收到內容: {body}")
         return "Error", 500
 
-# 用戶數據文件路徑
-USER_DATA_FILE = "user_data.json"
+# 用戶數據文件路徑（使用 /tmp 目錄以確保在 Render 上可寫入）
+USER_DATA_FILE = "/tmp/user_data.json" if os.environ.get("RENDER") else os.path.join(os.path.dirname(__file__), "data", "user_data.json")
 
 def create_terms_flex_message():
     """創建專業的用戶條款 Flex Message"""
@@ -722,21 +722,108 @@ def create_terms_flex_message():
 
 def load_user_data():
     """載入用戶數據"""
-    if os.path.exists(USER_DATA_FILE):
-        try:
-            with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
+    try:
+        # 檢查文件是否存在
+        if not os.path.exists(USER_DATA_FILE):
+            print(f"⚠️ 用戶數據文件不存在: {USER_DATA_FILE}")
             return {}
-    return {}
+            
+        # 檢查文件權限
+        if not os.access(USER_DATA_FILE, os.R_OK):
+            print(f"⚠️ 無法讀取用戶數據文件（權限問題）: {USER_DATA_FILE}")
+            return {}
+            
+        # 讀取文件
+        with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        # 驗證數據格式
+        if not isinstance(data, dict):
+            print(f"⚠️ 用戶數據格式無效: {type(data)}")
+            return {}
+            
+        print(f"✅ 成功載入用戶數據，共 {len(data)} 位用戶")
+        
+        # 檢查並修復可能的無效狀態
+        for user_id, user_data in data.items():
+            if not isinstance(user_data, dict):
+                print(f"⚠️ 用戶 {user_id} 數據格式無效，重置")
+                data[user_id] = {"status": "pending"}
+                continue
+                
+            if "status" not in user_data:
+                print(f"⚠️ 用戶 {user_id} 缺少狀態資訊，設為 pending")
+                user_data["status"] = "pending"
+            elif user_data["status"] not in ["pending", "awaiting_button_response", "awaiting_tutorial_choice", "tutorial_shown", "detailed_tutorial", "agreed", "disagreed"]:
+                print(f"⚠️ 用戶 {user_id} 狀態無效: {user_data['status']}，重置為 pending")
+                user_data["status"] = "pending"
+                
+            print(f"用戶 {user_id} 狀態: {user_data['status']}")
+            
+        return data
+        
+    except json.JSONDecodeError as e:
+        print(f"❌ 用戶數據文件格式錯誤: {e}")
+        return {}
+    except Exception as e:
+        print(f"❌ 載入用戶數據失敗: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
 
 def save_user_data(data):
     """保存用戶數據"""
     try:
+        # 驗證數據
+        if not isinstance(data, dict):
+            raise ValueError(f"數據格式無效: {type(data)}")
+            
+        # 驗證每個用戶的數據格式
+        for user_id, user_data in data.items():
+            if not isinstance(user_data, dict):
+                raise ValueError(f"用戶 {user_id} 數據格式無效: {type(user_data)}")
+            if "status" not in user_data:
+                raise ValueError(f"用戶 {user_id} 缺少狀態資訊")
+                
+        # 確保目錄存在
+        directory = os.path.dirname(USER_DATA_FILE)
+        if directory and not os.path.exists(directory):
+            try:
+                os.makedirs(directory, exist_ok=True)
+                print(f"✅ 創建目錄成功: {directory}")
+            except Exception as e:
+                print(f"⚠️ 無法創建目錄 {directory}: {e}")
+                # 如果是 Render 環境，使用 /tmp
+                if os.environ.get("RENDER"):
+                    global USER_DATA_FILE
+                    USER_DATA_FILE = "/tmp/user_data.json"
+                    print(f"🔄 切換到 /tmp 目錄: {USER_DATA_FILE}")
+        
+        # 保存文件
         with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            
+        print(f"✅ 成功保存用戶數據，共 {len(data)} 位用戶")
+        
+        # 顯示每個用戶的狀態
+        for user_id, user_data in data.items():
+            print(f"用戶 {user_id}: {user_data.get('status', 'unknown')}")
+            
+        # 驗證文件是否真的保存成功
+        if not os.path.exists(USER_DATA_FILE):
+            raise FileNotFoundError(f"文件未成功創建: {USER_DATA_FILE}")
+            
+        file_size = os.path.getsize(USER_DATA_FILE)
+        if file_size == 0:
+            raise ValueError(f"文件大小為0: {USER_DATA_FILE}")
+            
+        print(f"✅ 文件保存成功: {USER_DATA_FILE} ({file_size} bytes)")
+        
     except Exception as e:
-        print(f"保存用戶數據失敗: {e}")
+        print(f"❌ 保存用戶數據失敗: {e}")
+        print(f"當前數據: {data}")
+        import traceback
+        traceback.print_exc()
 
 def create_welcome_message():
     """創建歡迎訊息 - 條款同意完成"""
@@ -1693,13 +1780,13 @@ def handle_message(event):
     if event.message.id in global_data_store["processed_messages"]:
         print(f"⚠️ 跳過重複消息: {event.message.id}")
         return
-    
+
     try:
-        # 檢查是否有其他消息正在處理中
-        if global_data_store["message_lock"]:
-            print("⚠️ 另一個消息正在處理中，稍後重試")
+    # 檢查是否有其他消息正在處理中
+    if global_data_store["message_lock"]:
+        print("⚠️ 另一個消息正在處理中，稍後重試")
             return
-        
+
         # 設置消息鎖
         global_data_store["message_lock"] = True
         
@@ -1837,7 +1924,7 @@ def handle_message(event):
                     print(f"💬 處理一般文字訊息: {msg}")
                     _, docs = search_related_content(retriever, msg)
                     response = generate_answer(msg, docs)
-                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
                 return
                 
             elif status == "disagreed":
@@ -1853,18 +1940,18 @@ def handle_message(event):
                     reply = "由於您尚未同意服務條款，目前無法使用糖小護的功能。\n\n如果您想重新開始，請輸入「重新開始」。"
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
                 return
-                
+            
         elif isinstance(event.message, ImageMessage):
             # 處理圖片訊息
             print("✅ 收到圖片訊息")
             if user_consent[user_id].get("status") == "agreed":
-                handle_image_message(event)
+            handle_image_message(event)
             else:
                 line_bot_api.reply_message(
                     event.reply_token,
                     TextSendMessage(text="請先同意服務條款才能使用圖片分析功能。")
                 )
-                
+            
     except LineBotApiError as e:
         print(f"❌ LINE API 錯誤: {str(e)}")
         try:
@@ -1900,7 +1987,7 @@ def handle_image_message(event):
     """處理圖片訊息"""
     temp_dir = "temp_images"
     image_path = None
-    
+        
     try:
         # 創建臨時文件夾（如果不存在）
         if not os.path.exists(temp_dir):
@@ -1915,15 +2002,15 @@ def handle_image_message(event):
             for chunk in message_content.iter_content():
                 f.write(chunk)
         
-        # 分析圖片並獲取 Flex Message
-        flex_message = analyze_food_image(image_path)
-        
-        # 回覆 Flex Message
-        line_bot_api.reply_message(
-            event.reply_token,
-            flex_message
-        )
-        
+            # 分析圖片並獲取 Flex Message
+            flex_message = analyze_food_image(image_path)
+            
+            # 回覆 Flex Message
+            line_bot_api.reply_message(
+                event.reply_token,
+                flex_message
+            )
+    
     except LineBotApiError as e:
         print(f"❌ LINE API 錯誤: {str(e)}")
         line_bot_api.reply_message(
@@ -1936,11 +2023,11 @@ def handle_image_message(event):
             event.reply_token,
             TextSendMessage(text="⚠️ 系統錯誤，請稍後再試。")
         )
-    finally:
+        finally:
         # 清理臨時文件
         if image_path and os.path.exists(image_path):
             try:
-                os.remove(image_path)
+                    os.remove(image_path)
             except Exception as e:
                 print(f"⚠️ 無法刪除臨時文件: {str(e)}")
 
