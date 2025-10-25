@@ -259,68 +259,98 @@ def initialize_vector_db():
     """初始化向量資料庫，如果不存在則從 CSV 創建"""
     import pandas as pd
     
-    # 設置路徑（在 Render 上使用 /tmp 目錄）
+    # 1. 設置所有路徑（一次設定，不再更改）
     base_dir = os.path.dirname(__file__)
-    if os.environ.get("RENDER"):
-        db_dir = "/tmp/vector_DB"
-    else:
-        db_dir = os.path.join(base_dir, "vector_DB")
-        db_path = os.path.join(db_dir, "diabetes_comprehensive_db")
-        csv_path = os.path.join(base_dir, "datacsv", "a_topic_analyzed_processed.csv")
+    db_dir = "/tmp/vector_DB" if os.environ.get("RENDER") else os.path.join(base_dir, "vector_DB")
+    db_path = os.path.join(db_dir, "diabetes_comprehensive_db")
+    csv_path = os.path.join(base_dir, "datacsv", "a_topic_analyzed_processed.csv")
     
     print(f"向量資料庫路徑: {db_path}")
     print(f"CSV 文件路徑: {csv_path}")
     
-    # 確保目錄存在
-    os.makedirs(db_dir, exist_ok=True)
-    
-    # 檢查向量資料庫是否已存在
-    if os.path.exists(db_path):
-        print("✓ 向量資料庫已存在")
+    try:
+        # 2. 確保目錄存在
+        os.makedirs(db_dir, exist_ok=True)
+        
+        # 3. 檢查並載入現有向量資料庫
+        if os.path.exists(db_path):
+            print("檢查現有向量資料庫...")
+            try:
+                # 創建嵌入模型
+                model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
+                embeddings = HuggingFaceEmbeddings(
+                    model_name=EMBED_MODEL_NAME,
+                    model_kwargs=model_kwargs
+                )
+                
+                # 嘗試載入資料庫
+                db = FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
+                # 簡單驗證：確保資料庫不是空的
+                if db and len(db.docstore._dict) > 0:
+                    print("✅ 成功載入現有向量資料庫")
+                    return db_path
+                else:
+                    print("⚠️ 向量資料庫存在但可能損壞或為空")
+            except Exception as e:
+                print(f"⚠️ 載入現有向量資料庫失敗: {e}")
+                # 如果載入失敗，繼續創建新的資料庫
+        
+        # 4. 從 CSV 創建新的向量資料庫
+        print("⚙️ 開始創建新的向量資料庫...")
+        
+        # 檢查並讀取 CSV
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"找不到資料文件：{csv_path}")
+            
+        # 讀取 CSV
+        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        
+        # 檢查必要欄位
+        required_cols = ["對應子問題", "回答"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"CSV 缺少必要欄位: {', '.join(missing_cols)}")
+        
+        # 過濾無效行
+        df = df.dropna(subset=["對應子問題", "回答"])
+        if df.empty:
+            raise ValueError("CSV 文件中沒有有效的問答對")
+        
+        # 準備文本
+        texts = []
+        for _, row in df.iterrows():
+            text = f"問題：{row['對應子問題']}\n答案：{row['回答']}"
+            texts.append(text)
+        
+        print(f"✓ 載入了 {len(texts)} 筆問答對")
+        
+        # 創建嵌入
+        model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
+        embeddings = HuggingFaceEmbeddings(
+            model_name=EMBED_MODEL_NAME,
+            model_kwargs=model_kwargs
+        )
+        
+        # 創建向量資料庫
+        db = FAISS.from_texts(texts, embeddings)
+        if not db or len(db.docstore._dict) == 0:
+            raise ValueError("創建的向量資料庫是空的")
+        
+        # 保存資料庫
+        db.save_local(db_path)
+        
+        # 驗證保存是否成功
+        if not os.path.exists(db_path) or not os.listdir(db_path):
+            raise FileNotFoundError("向量資料庫保存失敗或保存的文件是空的")
+            
+        print(f"✅ 向量資料庫成功創建並保存至：{db_path}")
         return db_path
         
-    print("⚙️ 向量資料庫不存在，開始創建...")
-    
-    # 檢查 CSV 文件
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"找不到資料文件：{csv_path}")
-    
-    # 讀取 CSV
-    df = pd.read_csv(csv_path, encoding="utf-8-sig")
-    
-    # 檢查必要欄位
-    required_cols = ["對應子問題", "回答"]
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        raise ValueError(f"CSV 缺少必要欄位: {', '.join(missing_cols)}")
-    
-    # 過濾無效行
-    df = df.dropna(subset=["對應子問題", "回答"])
-    
-    # 準備文本
-    texts = []
-    for _, row in df.iterrows():
-        # 組合問題和答案
-        text = f"問題：{row['對應子問題']}\n答案：{row['回答']}"
-        texts.append(text)
-    
-    print(f"✓ 載入了 {len(texts)} 筆問答對")
-    
-    # 創建嵌入
-    model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBED_MODEL_NAME,
-        model_kwargs=model_kwargs
-    )
-    
-    # 創建向量資料庫
-    db = FAISS.from_texts(texts, embeddings)
-    
-    # 保存資料庫
-    db.save_local(db_path)
-    print(f"✓ 向量資料庫已保存至：{db_path}")
-    
-    return db_path
+    except Exception as e:
+        print(f"❌ 初始化向量資料庫時發生錯誤: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise  # 向上傳遞錯誤，讓應用程式知道初始化失敗
 
 def generate_retriever():
     """生成檢索器"""
