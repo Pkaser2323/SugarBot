@@ -85,8 +85,8 @@ def initialize_sas_model():
             print(f"⚠️ 無法從 Hugging Face 加載參數: {str(e)}")
             print("⏳ 嘗試從本地加載參數...")
             try:
-with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
-    SAS_PARAMS = json.load(f)
+                with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8") as f:
+                    SAS_PARAMS = json.load(f)
                 print("✅ 從本地加載參數成功！")
             except Exception as e2:
                 print(f"⚠️ 無法從本地加載參數: {str(e2)}")
@@ -97,7 +97,7 @@ with open(os.path.join(SAS_MODEL_DIR, "best_params.json"), "r", encoding="utf-8"
         print(f"⚠️ 無法從 Hugging Face 加載模型: {str(e)}")
         print("⏳ 嘗試從本地加載模型...")
         try:
-sas_model = CrossEncoder(SAS_MODEL_DIR)
+            sas_model = CrossEncoder(SAS_MODEL_DIR)
             sas_model.model = sas_model.model.to("cpu")
             print("✅ 從本地加載模型成功！")
             
@@ -773,6 +773,7 @@ def load_user_data():
 
 def save_user_data(data):
     """保存用戶數據"""
+    global USER_DATA_FILE
     try:
         # 驗證數據
         if not isinstance(data, dict):
@@ -795,7 +796,6 @@ def save_user_data(data):
                 print(f"⚠️ 無法創建目錄 {directory}: {e}")
                 # 如果是 Render 環境，使用 /tmp
                 if os.environ.get("RENDER"):
-                    global USER_DATA_FILE
                     USER_DATA_FILE = "/tmp/user_data.json"
                     print(f"🔄 切換到 /tmp 目錄: {USER_DATA_FILE}")
         
@@ -1783,8 +1783,8 @@ def handle_message(event):
 
     try:
     # 檢查是否有其他消息正在處理中
-    if global_data_store["message_lock"]:
-        print("⚠️ 另一個消息正在處理中，稍後重試")
+        if global_data_store["message_lock"]:
+            print("⚠️ 另一個消息正在處理中，稍後重試")
             return
 
         # 設置消息鎖
@@ -1924,7 +1924,7 @@ def handle_message(event):
                     print(f"💬 處理一般文字訊息: {msg}")
                     _, docs = search_related_content(retriever, msg)
                     response = generate_answer(msg, docs)
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
                 return
                 
             elif status == "disagreed":
@@ -1945,7 +1945,7 @@ def handle_message(event):
             # 處理圖片訊息
             print("✅ 收到圖片訊息")
             if user_consent[user_id].get("status") == "agreed":
-            handle_image_message(event)
+                handle_image_message(event)
             else:
                 line_bot_api.reply_message(
                     event.reply_token,
@@ -2023,11 +2023,11 @@ def handle_image_message(event):
             event.reply_token,
             TextSendMessage(text="⚠️ 系統錯誤，請稍後再試。")
         )
-        finally:
+    finally:
         # 清理臨時文件
         if image_path and os.path.exists(image_path):
             try:
-                    os.remove(image_path)
+                os.remove(image_path)
             except Exception as e:
                 print(f"⚠️ 無法刪除臨時文件: {str(e)}")
 
