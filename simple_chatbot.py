@@ -259,11 +259,17 @@ def initialize_vector_db():
     """初始化向量資料庫，如果不存在則從 CSV 創建"""
     import pandas as pd
     
-    # 設置路徑
+    # 設置路徑（在 Render 上使用 /tmp 目錄）
     base_dir = os.path.dirname(__file__)
-    db_dir = os.path.join(base_dir, "vector_DB")
+    if os.environ.get("RENDER"):
+        db_dir = "/tmp/vector_DB"
+    else:
+        db_dir = os.path.join(base_dir, "vector_DB")
     db_path = os.path.join(db_dir, "diabetes_comprehensive_db")
     csv_path = os.path.join(base_dir, "datacsv", "a_topic_analyzed_processed.csv")
+    
+    print(f"向量資料庫路徑: {db_path}")
+    print(f"CSV 文件路徑: {csv_path}")
     
     # 確保目錄存在
     os.makedirs(db_dir, exist_ok=True)
@@ -436,17 +442,23 @@ def generate_answer(query: str, docs=None):
         all_evidence = []
         low_thr = SAS_PARAMS.get("low_threshold", 0.3)
         
-        try:
-            for sq in subqs:
+        # 檢查向量資料庫是否初始化
+        if not vector_db:
+            print("⚠️ 向量資料庫尚未初始化")
+            return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
+
+        # 為每個子問題檢索並評估
+        for sq in subqs:
+            try:
+                print(f"檢索子問題: {sq}")
                 # 檢索相關文本
-                if not vector_db:
-                    print("⚠️ 向量資料庫尚未初始化，跳過子問題檢索")
-                    continue
-                    
                 sq_docs = vector_db.invoke(sq)
                 if not sq_docs:
+                    print("未找到相關文本")
                     continue
-                    
+                
+                print(f"找到 {len(sq_docs)} 個相關文本")
+                
                 # 評估每個檢索結果
                 _, probs = predict_pos_prob(
                     sas_model,
@@ -454,16 +466,21 @@ def generate_answer(query: str, docs=None):
                     [doc.page_content for doc in sq_docs],
                     temperature=SAS_PARAMS.get("temperature", 2.0)
                 )
-        except Exception as e:
-            print(f"⚠️ 子問題檢索失敗: {str(e)}")
-            return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
-            
-            # 收集通過低門檻的段落
-            passed_indices = np.nonzero(probs >= low_thr)[0]
-            if len(passed_indices) > 0:
-                # 選擇最多2個最高分的段落
-                top_indices = passed_indices[np.argsort(-probs[passed_indices])[:2]]
-                all_evidence.extend([sq_docs[i].page_content for i in top_indices])
+                
+                # 收集通過低門檻的段落
+                passed_indices = np.nonzero(probs >= low_thr)[0]
+                if len(passed_indices) > 0:
+                    # 選擇最多2個最高分的段落
+                    top_indices = passed_indices[np.argsort(-probs[passed_indices])[:2]]
+                    selected_docs = [sq_docs[i].page_content for i in top_indices]
+                    all_evidence.extend(selected_docs)
+                    print(f"添加 {len(selected_docs)} 個高分段落")
+                else:
+                    print("沒有段落通過低門檻")
+                    
+            except Exception as e:
+                print(f"⚠️ 處理子問題時發生錯誤: {str(e)}")
+                continue  # 繼續處理下一個子問題
         
         # 如果沒有找到任何有效證據
         if not all_evidence:
@@ -625,7 +642,8 @@ global_data_store = {
     "message_lock": False,        # 用於防止並發處理
     "food_analysis": {},         # 用於保存食物分析結果
     "user_data_cache": {},       # 用於緩存用戶數據
-    "last_save_time": None       # 上次保存時間
+    "last_save_time": None,      # 上次保存時間
+    "data_hash": None           # 用戶數據的雜湊值
 }
 
 def create_terms_flex_message():
@@ -834,9 +852,10 @@ def load_user_data():
                 
             print(f"用戶 {user_id} 狀態: {user_data['status']}")
         
-        # 更新緩存
-        global_data_store["user_data_cache"] = data.copy()
+        # 更新緩存（使用深拷貝）
+        global_data_store["user_data_cache"] = json.loads(json.dumps(data))
         global_data_store["last_save_time"] = datetime.now()
+        global_data_store["data_hash"] = calculate_data_hash(data)
             
         return data
         
@@ -858,14 +877,29 @@ def load_user_data():
         traceback.print_exc()
         return {}
 
+def calculate_data_hash(data):
+    """計算數據的雜湊值（用於檢測變更）"""
+    try:
+        # 將數據轉換為規範化的 JSON 字符串（確保鍵的順序一致）
+        json_str = json.dumps(data, sort_keys=True)
+        # 計算 SHA-256 雜湊
+        return hashlib.sha256(json_str.encode()).hexdigest()
+    except Exception as e:
+        print(f"⚠️ 計算數據雜湊時出錯: {e}")
+        return None
+
 def save_user_data(data):
     """保存用戶數據"""
     global USER_DATA_FILE, global_data_store
     
+    # 計算當前數據的雜湊值
+    current_hash = calculate_data_hash(data)
+    cached_hash = global_data_store.get("data_hash")
+    
     # 檢查是否需要保存
-    if global_data_store["last_save_time"]:
+    if global_data_store["last_save_time"] and current_hash and cached_hash:
         time_diff = (datetime.now() - global_data_store["last_save_time"]).total_seconds()
-        if time_diff < 5 and data == global_data_store["user_data_cache"]:
+        if time_diff < 5 and current_hash == cached_hash:
             print("⏳ 跳過保存：數據未變更或距離上次保存時間太短")
             return
     
@@ -900,9 +934,10 @@ def save_user_data(data):
             
         print(f"✅ 成功保存用戶數據，共 {len(data)} 位用戶")
         
-        # 更新緩存
-        global_data_store["user_data_cache"] = data.copy()
+        # 更新緩存（使用深拷貝）
+        global_data_store["user_data_cache"] = json.loads(json.dumps(data))
         global_data_store["last_save_time"] = datetime.now()
+        global_data_store["data_hash"] = current_hash
         
         # 驗證文件是否真的保存成功
         if not os.path.exists(USER_DATA_FILE):

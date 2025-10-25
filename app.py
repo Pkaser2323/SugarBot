@@ -1040,8 +1040,8 @@ def linebot():
     body = request.get_data(as_text=True)
     try:
         json_data = json.loads(body)
-        access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
-        secret = os.environ.get('LINE_CHANNEL_SECRET')
+        access_token = os.environ.get('LINE_ACCESS_TOKEN')
+        secret = os.environ.get('LINE_SECRET')
         
         if not access_token or not secret:
             print("錯誤: LINE_CHANNEL_ACCESS_TOKEN 或 LINE_CHANNEL_SECRET 環境變數未設定")
