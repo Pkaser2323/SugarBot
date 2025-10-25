@@ -336,19 +336,21 @@ def generate_retriever():
     
     return db.as_retriever(search_kwargs={"k": 5})
 
-retriever = generate_retriever()
-
-def search_related_content(retriever, query):
+def search_related_content(query):
     """檢索相關文本
     
     Args:
-        retriever: 檢索器
         query: 查詢文本
         
     Returns:
         Tuple[str, List]: (合併後的文本, 文檔列表)
     """
-    docs = retriever.invoke(query)
+    global vector_db
+    if not vector_db:
+        print("⚠️ 向量資料庫尚未初始化")
+        return "", []
+        
+    docs = vector_db.invoke(query)
     return "\n---\n".join([doc.page_content for doc in docs]), docs
 
 def generate_answer(query: str, docs=None):
@@ -434,19 +436,27 @@ def generate_answer(query: str, docs=None):
         all_evidence = []
         low_thr = SAS_PARAMS.get("low_threshold", 0.3)
         
-        for sq in subqs:
-            # 檢索相關文本
-            sq_docs = retriever.invoke(sq)
-            if not sq_docs:
-                continue
-                
-            # 評估每個檢索結果
-            _, probs = predict_pos_prob(
-                sas_model,
-                [sq] * len(sq_docs),
-                [doc.page_content for doc in sq_docs],
-                temperature=SAS_PARAMS.get("temperature", 2.0)
-            )
+        try:
+            for sq in subqs:
+                # 檢索相關文本
+                if not vector_db:
+                    print("⚠️ 向量資料庫尚未初始化，跳過子問題檢索")
+                    continue
+                    
+                sq_docs = vector_db.invoke(sq)
+                if not sq_docs:
+                    continue
+                    
+                # 評估每個檢索結果
+                _, probs = predict_pos_prob(
+                    sas_model,
+                    [sq] * len(sq_docs),
+                    [doc.page_content for doc in sq_docs],
+                    temperature=SAS_PARAMS.get("temperature", 2.0)
+                )
+        except Exception as e:
+            print(f"⚠️ 子問題檢索失敗: {str(e)}")
+            return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
             
             # 收集通過低門檻的段落
             passed_indices = np.nonzero(probs >= low_thr)[0]
@@ -502,25 +512,61 @@ def generate_answer(query: str, docs=None):
         print(f"❌ 生成回答時發生錯誤: {str(e)}")
         return "抱歉，系統暫時無法處理您的問題，請稍後再試。"
 
-# Flask app setup
+# 全局變數初始化
 app = Flask(__name__)
 port = 5000
+line_bot_api = None
+handler = None
+vector_db = None
+initialized = False
+
+def initialize_app():
+    """初始化應用程式（只在第一次啟動時執行）"""
+    global line_bot_api, handler, vector_db, initialized
+    
+    if initialized:
+        return
+    
+    try:
+        print("⚙️ 開始初始化應用程式...")
 
 # LINE Bot setup
-line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_SECRET)
+        print("⏳ 初始化 LINE Bot API...")
+        global line_bot_api
+        line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
+        global handler
+        handler = WebhookHandler(LINE_SECRET)
+        print("✅ LINE Bot API 初始化成功")
+        
+        # 初始化向量資料庫
+        print("⏳ 初始化向量資料庫...")
+        vector_db = generate_retriever()
+        print("✅ 向量資料庫初始化成功")
+        
+        # 標記初始化完成
+        initialized = True
+        print("✅ 應用程式初始化完成")
+        
+    except Exception as e:
+        print(f"❌ 應用程式初始化失敗: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise
 
-# 測試 LINE API 連線
-try:
-    print("✅ Testing LINE API connection")
-    print("✅ LINE API setup completed")
-except Exception as e:
-    print(f"❌ LINE API setup error: {str(e)}")
+# 在應用程式啟動時初始化
+initialize_app()
 
 # 根路徑
 @app.route("/", methods=["GET"])
 def root():
     """根路徑處理"""
+    global initialized
+    if not initialized:
+        try:
+            initialize_app()
+            return "糖尿病諮詢 LINE Bot 服務初始化完成", 200
+        except:
+            return "糖尿病諮詢 LINE Bot 服務初始化失敗", 500
     return "糖尿病諮詢 LINE Bot 服務正在運行中", 200
 
 # 健康檢查路由
@@ -564,9 +610,23 @@ def callback():
         print(f"處理 Webhook 時發生錯誤: {str(e)}")
         print(f"收到內容: {body}")
         return "Error", 500
+    
+# 設置基礎路徑
+BASE_DIR = os.path.dirname(__file__)
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# 用戶數據文件路徑（使用 /tmp 目錄以確保在 Render 上可寫入）
-USER_DATA_FILE = "/tmp/user_data.json" if os.environ.get("RENDER") else os.path.join(os.path.dirname(__file__), "data", "user_data.json")
+# 用戶數據文件路徑（使用專案目錄的 data 資料夾確保所有 worker 共享）
+USER_DATA_FILE = os.path.join(DATA_DIR, "user_data.json")
+
+# 全局數據存儲（必須在 load_user_data 之前定義）
+global_data_store = {
+    "processed_messages": set(),  # 用於存儲已處理的消息ID
+    "message_lock": False,        # 用於防止並發處理
+    "food_analysis": {},         # 用於保存食物分析結果
+    "user_data_cache": {},       # 用於緩存用戶數據
+    "last_save_time": None       # 上次保存時間
+}
 
 def create_terms_flex_message():
     """創建專業的用戶條款 Flex Message"""
@@ -722,10 +782,24 @@ def create_terms_flex_message():
 
 def load_user_data():
     """載入用戶數據"""
+    global global_data_store
+    
     try:
+        # 如果緩存中有數據且距離上次保存時間不超過5秒，直接返回緩存
+        if global_data_store["user_data_cache"] and global_data_store["last_save_time"]:
+            time_diff = (datetime.now() - global_data_store["last_save_time"]).total_seconds()
+            if time_diff < 5:
+                print("⚡ 使用緩存的用戶數據")
+                return global_data_store["user_data_cache"].copy()
+        
         # 檢查文件是否存在
         if not os.path.exists(USER_DATA_FILE):
-            print(f"⚠️ 用戶數據文件不存在: {USER_DATA_FILE}")
+            print(f"⚠️ 用戶數據文件不存在，將創建新文件: {USER_DATA_FILE}")
+            # 確保目錄存在
+            os.makedirs(os.path.dirname(USER_DATA_FILE), exist_ok=True)
+            # 創建空的用戶數據文件
+            with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump({}, f, ensure_ascii=False, indent=2)
             return {}
             
         # 檢查文件權限
@@ -759,11 +833,24 @@ def load_user_data():
                 user_data["status"] = "pending"
                 
             print(f"用戶 {user_id} 狀態: {user_data['status']}")
+        
+        # 更新緩存
+        global_data_store["user_data_cache"] = data.copy()
+        global_data_store["last_save_time"] = datetime.now()
             
         return data
         
     except json.JSONDecodeError as e:
         print(f"❌ 用戶數據文件格式錯誤: {e}")
+        # 備份損壞的文件
+        if os.path.exists(USER_DATA_FILE):
+            backup_file = f"{USER_DATA_FILE}.bak.{int(time.time())}"
+            try:
+                import shutil
+                shutil.copy2(USER_DATA_FILE, backup_file)
+                print(f"✅ 已備份損壞的文件到: {backup_file}")
+            except Exception as be:
+                print(f"⚠️ 備份文件失敗: {be}")
         return {}
     except Exception as e:
         print(f"❌ 載入用戶數據失敗: {e}")
@@ -773,7 +860,15 @@ def load_user_data():
 
 def save_user_data(data):
     """保存用戶數據"""
-    global USER_DATA_FILE
+    global USER_DATA_FILE, global_data_store
+    
+    # 檢查是否需要保存
+    if global_data_store["last_save_time"]:
+        time_diff = (datetime.now() - global_data_store["last_save_time"]).total_seconds()
+        if time_diff < 5 and data == global_data_store["user_data_cache"]:
+            print("⏳ 跳過保存：數據未變更或距離上次保存時間太短")
+            return
+    
     try:
         # 驗證數據
         if not isinstance(data, dict):
@@ -805,10 +900,10 @@ def save_user_data(data):
             
         print(f"✅ 成功保存用戶數據，共 {len(data)} 位用戶")
         
-        # 顯示每個用戶的狀態
-        for user_id, user_data in data.items():
-            print(f"用戶 {user_id}: {user_data.get('status', 'unknown')}")
-            
+        # 更新緩存
+        global_data_store["user_data_cache"] = data.copy()
+        global_data_store["last_save_time"] = datetime.now()
+        
         # 驗證文件是否真的保存成功
         if not os.path.exists(USER_DATA_FILE):
             raise FileNotFoundError(f"文件未成功創建: {USER_DATA_FILE}")
@@ -1582,13 +1677,6 @@ def create_image_tutorial_carousel():
 # 載入用戶同意狀態
 user_consent = load_user_data()
 
-# 全局數據存儲
-global_data_store = {
-    "processed_messages": set(),  # 用於存儲已處理的消息ID
-    "message_lock": False,        # 用於防止並發處理
-    "food_analysis": {}          # 用於保存食物分析結果
-}
-
 def translate_to_chinese(english_text):
     """翻譯英文食物名稱為繁體中文"""
     translation_prompt = f"""請將以下食物名稱翻譯為繁體中文，精準翻譯，只回傳食物名稱，不要其他描述或多餘的詞彙。
@@ -1759,18 +1847,43 @@ def handle_follow(event):
     """處理加好友事件"""
     user_id = event.source.user_id
     
-    # 新用戶加入 → 發送專業的條款頁面
-    flex_message = create_terms_flex_message()
-    line_bot_api.reply_message(event.reply_token, FlexSendMessage(
-        alt_text=flex_message["altText"],
-        contents=flex_message["contents"]
-    ))
-    user_consent[user_id] = {
-        "status": "pending",
-        "first_contact": datetime.now().isoformat(),
-        "blood_sugar_records": []
-    }
-    save_user_data(user_consent)
+    try:
+        # 檢查用戶是否已有狀態記錄
+        if user_id in user_consent and isinstance(user_consent[user_id], dict):
+            current_status = user_consent[user_id].get("status")
+            if current_status:
+                print(f"用戶 {user_id} 已有狀態記錄: {current_status}，跳過條款發送")
+                # 如果用戶之前有狀態，保持原狀
+                return
+                
+        # 新用戶或狀態無效 → 發送專業的條款頁面
+        print(f"新用戶 {user_id} 加入或狀態無效，發送條款")
+        flex_message = create_terms_flex_message()
+        line_bot_api.reply_message(event.reply_token, FlexSendMessage(
+            alt_text=flex_message["altText"],
+            contents=flex_message["contents"]
+        ))
+        
+        # 初始化或重置用戶狀態
+        user_consent[user_id] = {
+            "status": "pending",
+            "first_contact": datetime.now().isoformat(),
+            "blood_sugar_records": []
+        }
+        save_user_data(user_consent)
+        
+    except Exception as e:
+        print(f"❌ 處理加好友事件時發生錯誤: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        # 即使發生錯誤，也確保用戶能收到回應
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="歡迎使用糖小護！如果您看不到服務條款，請輸入「重新開始」。")
+            )
+        except:
+            pass
 
 # 處理訊息事件
 @handler.add(MessageEvent)
@@ -1783,7 +1896,7 @@ def handle_message(event):
 
     try:
     # 檢查是否有其他消息正在處理中
-        if global_data_store["message_lock"]:
+        if global_data_store.get("message_lock", False):
             print("⚠️ 另一個消息正在處理中，稍後重試")
             return
 
@@ -1922,10 +2035,10 @@ def handle_message(event):
                 else:
                     # 使用 RAG 生成回答
                     print(f"💬 處理一般文字訊息: {msg}")
-                    _, docs = search_related_content(retriever, msg)
+                    _, docs = search_related_content(msg)
                     response = generate_answer(msg, docs)
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
-                return
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=response))
+                    return
                 
             elif status == "disagreed":
                 if msg == "重新開始":
@@ -2027,7 +2140,7 @@ def handle_image_message(event):
         # 清理臨時文件
         if image_path and os.path.exists(image_path):
             try:
-                os.remove(image_path)
+                    os.remove(image_path)
             except Exception as e:
                 print(f"⚠️ 無法刪除臨時文件: {str(e)}")
 
