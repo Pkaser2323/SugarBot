@@ -1990,16 +1990,16 @@ def handle_message(event):
         print(f"⚠️ 跳過重複消息: {event.message.id}")
         return
     for key, make in TUTORIAL_FUNCS.items():
-    if key == msg:  # 想要完全相等就改成: if msg == key:
-        selected = make()
-        line_bot_api.reply_message(
-            event.reply_token,
-            FlexSendMessage(
-                alt_text=selected["altText"],
-                contents=selected["contents"]
+        if key == msg:  # 想要完全相等就改成: if msg == key:
+            selected = make()
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(
+                    alt_text=selected["altText"],
+                    contents=selected["contents"]
+                )
             )
-        )
-        return  # 很重要：攔截後結束，不再往下跑狀態機
+            return
     try:
     # 檢查是否有其他消息正在處理中
         if global_data_store.get("message_lock", False):
