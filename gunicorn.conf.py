@@ -26,3 +26,4 @@ preload_app = True  # 在 fork worker 之前加載應用
 def when_ready(server):
     # 當 Gunicorn 準備好接收請求時執行
     server.log.info("Gunicorn 已準備好接收請求！")
+

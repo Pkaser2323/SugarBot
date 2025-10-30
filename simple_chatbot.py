@@ -1935,15 +1935,18 @@ def handle_follow(event):
     
     try:
         # 檢查用戶是否已有狀態記錄
+        '''
         if user_id in user_consent and isinstance(user_consent[user_id], dict):
             current_status = user_consent[user_id].get("status")
             if current_status:
                 print(f"用戶 {user_id} 已有狀態記錄: {current_status}，跳過條款發送")
                 # 如果用戶之前有狀態，保持原狀
                 return
-                
-        # 新用戶或狀態無效 → 發送專業的條款頁面
+                        # 新用戶或狀態無效 → 發送專業的條款頁面
         print(f"新用戶 {user_id} 加入或狀態無效，發送條款")
+        '''
+                
+
         flex_message = create_terms_flex_message()
         line_bot_api.reply_message(event.reply_token, FlexSendMessage(
             alt_text=flex_message["altText"],
@@ -1971,6 +1974,13 @@ def handle_follow(event):
         except:
             pass
 
+TUTORIAL_FUNCS = {
+    "問答教學": create_qa_tutorial_carousel,
+    "語音教學": create_voice_tutorial_carousel,
+    "血糖教學": create_blood_sugar_tutorial_carousel,
+    "影像教學": create_image_tutorial_carousel,
+}
+
 # 處理訊息事件
 @handler.add(MessageEvent)
 def handle_message(event):
@@ -1979,7 +1989,17 @@ def handle_message(event):
     if event.message.id in global_data_store["processed_messages"]:
         print(f"⚠️ 跳過重複消息: {event.message.id}")
         return
-
+    for key, make in TUTORIAL_FUNCS.items():
+    if key == msg:  # 想要完全相等就改成: if msg == key:
+        selected = make()
+        line_bot_api.reply_message(
+            event.reply_token,
+            FlexSendMessage(
+                alt_text=selected["altText"],
+                contents=selected["contents"]
+            )
+        )
+        return  # 很重要：攔截後結束，不再往下跑狀態機
     try:
     # 檢查是否有其他消息正在處理中
         if global_data_store.get("message_lock", False):
