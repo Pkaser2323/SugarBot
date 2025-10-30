@@ -1989,6 +1989,7 @@ def handle_message(event):
     if event.message.id in global_data_store["processed_messages"]:
         print(f"⚠️ 跳過重複消息: {event.message.id}")
         return
+    msg = event.message.text.strip()
     for key, make in TUTORIAL_FUNCS.items():
         if key == msg:  # 想要完全相等就改成: if msg == key:
             selected = make()
